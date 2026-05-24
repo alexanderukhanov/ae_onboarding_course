@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a NestJS + Prisma + Postgres library catalog service with full-text book search and a concurrency-safe reservation flow, exercisable via Swagger UI, with unit and integration tests that block merging in GitHub Actions on failure.
+**Goal:** Build a NestJS + Drizzle + Postgres library catalog service with full-text book search and a concurrency-safe reservation flow, exercisable via Swagger UI, with unit and integration tests that block merging in GitHub Actions on failure.
 
-**Architecture:** A single NestJS app with feature modules (Authors, Books, Search, Reservations) backed by Postgres 18.4 via Prisma. Search uses a Postgres `tsvector` generated column + GIN index, ranked with `ts_rank_cd`. Reservations use a single atomic `UPDATE ... WHERE available_copies > 0 RETURNING` inside a Prisma transaction to enforce concurrency without explicit row locks.
+**Architecture:** A single NestJS app with feature modules (Authors, Books, Search, Reservations). Each module is split into Service (business rules) and Repository (Drizzle queries) so services are cleanly unit-testable. Persistence on Postgres 18.4 via Drizzle ORM with the `postgres-js` driver. Search uses a Postgres `tsvector` stored generated column + GIN index, declared natively in the Drizzle schema, ranked with `ts_rank_cd`. Reservations use a single atomic `UPDATE ... WHERE available_copies > 0 RETURNING` inside a Drizzle transaction.
 
-**Tech Stack:** Node.js 24.16.0, TypeScript (strict), NestJS, Prisma, Postgres 18.4, Jest, supertest, @nestjs/swagger, class-validator, class-transformer, GitHub Actions.
+**Tech Stack:** Node.js 24.16.0, TypeScript ^6.0.3 (strict, modern config), NestJS ^11.1.23, Drizzle ORM ^0.45 + Drizzle Kit ^0.35, postgres ^3.4, Postgres 18.4, Jest ^30.4.2 (built-in types), supertest, @nestjs/swagger ^11, class-validator ^0.14, class-transformer ^0.5, uuid ^11, GitHub Actions.
 
 ---
 
@@ -17,28 +17,29 @@
 ├── .github/workflows/ci.yml
 ├── .nvmrc
 ├── .env.example
-├── .gitignore                          (extend existing)
+├── .gitignore                            (extend existing)
 ├── docker-compose.yml
 ├── package.json
-├── tsconfig.json
+├── tsconfig.json                         (modern strict)
 ├── tsconfig.build.json
 ├── nest-cli.json
 ├── eslint.config.mjs
-├── jest.config.ts                      (unit)
-├── prisma/
-│   ├── schema.prisma                   (models + reservation_status enum)
-│   ├── migrations/
-│   │   └── <ts>_init/migration.sql     (initial schema + tsvector generated col + indexes)
-│   └── seed.ts
+├── jest.config.ts                        (unit, ts-jest)
+├── drizzle.config.ts
+├── db/
+│   ├── schema.ts                         (tables, enums, relations, tsvector, indexes, checks)
+│   ├── types.ts                          (Database type alias)
+│   ├── seed.ts
+│   └── migrations/                       (drizzle-kit output, committed)
 ├── src/
-│   ├── main.ts                         (bootstrap, Swagger, ValidationPipe)
+│   ├── main.ts
 │   ├── app.module.ts
-│   ├── prisma/
-│   │   ├── prisma.module.ts
-│   │   └── prisma.service.ts
+│   ├── db/
+│   │   ├── drizzle.token.ts              (DRIZZLE symbol)
+│   │   └── db.module.ts                  (provider for Drizzle client)
 │   ├── common/
-│   │   ├── filters/prisma-exception.filter.ts
-│   │   ├── filters/prisma-exception.filter.spec.ts
+│   │   ├── filters/db-exception.filter.ts
+│   │   ├── filters/db-exception.filter.spec.ts
 │   │   ├── guards/user-exists.guard.ts
 │   │   ├── guards/user-exists.guard.spec.ts
 │   │   ├── decorators/current-user-id.decorator.ts
@@ -48,18 +49,21 @@
 │   │   ├── authors.controller.ts
 │   │   ├── authors.service.ts
 │   │   ├── authors.service.spec.ts
+│   │   ├── authors.repository.ts
 │   │   └── dto/*.ts
 │   ├── books/
 │   │   ├── books.module.ts
 │   │   ├── books.controller.ts
 │   │   ├── books.service.ts
 │   │   ├── books.service.spec.ts
+│   │   ├── books.repository.ts
 │   │   └── dto/*.ts
 │   ├── search/
 │   │   ├── search.module.ts
 │   │   ├── search.controller.ts
 │   │   ├── search.service.ts
-│   │   ├── ranking.ts                  (pure)
+│   │   ├── search.repository.ts
+│   │   ├── ranking.ts
 │   │   ├── ranking.spec.ts
 │   │   └── dto/*.ts
 │   └── reservations/
@@ -67,15 +71,16 @@
 │       ├── reservations.controller.ts
 │       ├── reservations.service.ts
 │       ├── reservations.service.spec.ts
-│       ├── transition.ts               (pure FSM)
+│       ├── reservations.repository.ts
+│       ├── transition.ts
 │       ├── transition.spec.ts
 │       └── dto/*.ts
 └── test/
     ├── jest-e2e.config.ts
     ├── globalSetup.ts
     ├── helpers/
-    │   ├── app.ts                      (createTestingApp)
-    │   └── db.ts                       (truncate / seed helpers)
+    │   ├── app.ts
+    │   └── db.ts
     ├── fixtures/
     │   └── search-cases.ts
     └── integration/
@@ -92,7 +97,7 @@
 - Create: `package.json`, `tsconfig.json`, `tsconfig.build.json`, `nest-cli.json`, `eslint.config.mjs`, `.nvmrc`, `src/main.ts`, `src/app.module.ts`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Pin Node and update .gitignore**
+- [ ] **Step 1: Pin Node and update `.gitignore`**
 
 Create `.nvmrc`:
 ```
@@ -109,7 +114,7 @@ coverage/
 *.log
 ```
 
-- [ ] **Step 2: Create `package.json`**
+- [ ] **Step 2: Create `package.json` (latest versions)**
 
 ```json
 {
@@ -121,75 +126,80 @@ coverage/
     "build": "nest build",
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
-    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"db/**/*.ts\"",
     "test:unit": "jest --config jest.config.ts",
     "test:integration": "jest --config test/jest-e2e.config.ts --runInBand",
-    "db:migrate": "prisma migrate dev",
-    "db:migrate:deploy": "prisma migrate deploy",
-    "db:seed": "ts-node prisma/seed.ts",
-    "prisma:generate": "prisma generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:seed": "ts-node db/seed.ts"
   },
   "dependencies": {
-    "@nestjs/common": "^10.4.0",
-    "@nestjs/config": "^3.2.0",
-    "@nestjs/core": "^10.4.0",
-    "@nestjs/platform-express": "^10.4.0",
-    "@nestjs/swagger": "^7.4.0",
-    "@prisma/client": "^5.20.0",
+    "@nestjs/common": "^11.1.23",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.1.23",
+    "@nestjs/platform-express": "^11.1.23",
+    "@nestjs/swagger": "^11.0.0",
     "class-transformer": "^0.5.1",
-    "class-validator": "^0.14.1",
+    "class-validator": "^0.14.2",
+    "drizzle-orm": "^0.45.0",
+    "postgres": "^3.4.5",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "uuid": "^11.0.5"
   },
   "devDependencies": {
-    "@nestjs/cli": "^10.4.0",
-    "@nestjs/testing": "^10.4.0",
-    "@types/express": "^4.17.21",
-    "@types/jest": "^29.5.12",
-    "@types/node": "^22.5.0",
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/testing": "^11.1.23",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
     "@types/supertest": "^6.0.2",
-    "@typescript-eslint/eslint-plugin": "^8.5.0",
-    "@typescript-eslint/parser": "^8.5.0",
-    "eslint": "^9.10.0",
-    "jest": "^29.7.0",
-    "prisma": "^5.20.0",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "drizzle-kit": "^0.35.0",
+    "eslint": "^9.18.0",
+    "jest": "^30.4.2",
     "supertest": "^7.0.0",
-    "ts-jest": "^29.2.5",
+    "ts-jest": "^30.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.5.4"
+    "typescript": "^6.0.3"
   }
 }
 ```
 
-- [ ] **Step 3: Create `tsconfig.json` and `tsconfig.build.json`**
+- [ ] **Step 3: Create modern `tsconfig.json` and `tsconfig.build.json`**
 
-`tsconfig.json`:
+`tsconfig.json` — modern strict config (CommonJS for NestJS 11 compatibility, ES2024 target, all useful strict flags):
 ```json
 {
   "compilerOptions": {
-    "module": "commonjs",
-    "target": "ES2022",
-    "moduleResolution": "node",
-    "declaration": false,
-    "removeComments": true,
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "sourceMap": true,
-    "outDir": "./dist",
-    "baseUrl": "./",
-    "incremental": true,
+
     "skipLibCheck": true,
-    "strict": true,
-    "strictNullChecks": true,
-    "noImplicitAny": true,
-    "strictBindCallApply": true,
-    "forceConsistentCasingInFileNames": true,
-    "noFallthroughCasesInSwitch": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "incremental": true,
+    "removeComments": true,
+    "declaration": false,
+    "outDir": "./dist",
+    "baseUrl": "./"
   },
-  "include": ["src/**/*", "test/**/*", "prisma/seed.ts"]
+  "include": ["src/**/*", "test/**/*", "db/**/*"]
 }
 ```
 
@@ -197,7 +207,7 @@ coverage/
 ```json
 {
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules", "test", "dist", "**/*spec.ts", "prisma/seed.ts"]
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts", "db/seed.ts"]
 }
 ```
 
@@ -219,7 +229,7 @@ import parser from '@typescript-eslint/parser';
 
 export default [
   {
-    files: ['src/**/*.ts', 'test/**/*.ts'],
+    files: ['src/**/*.ts', 'test/**/*.ts', 'db/**/*.ts'],
     languageOptions: { parser, parserOptions: { project: './tsconfig.json' } },
     plugins: { '@typescript-eslint': tseslint },
     rules: {
@@ -251,7 +261,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 
-async function bootstrap() {
+async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
@@ -262,9 +272,9 @@ async function bootstrap() {
     .addApiKey({ type: 'apiKey', in: 'header', name: 'X-User-Id' }, 'X-User-Id')
     .build();
   SwaggerModule.setup('api/docs', app, SwaggerModule.createDocument(app, cfg));
-  await app.listen(process.env.PORT ?? 3000);
+  await app.listen(Number(process.env.PORT ?? 3000));
 }
-bootstrap();
+void bootstrap();
 ```
 
 - [ ] **Step 6: Install dependencies and verify build**
@@ -277,7 +287,7 @@ Expected: build succeeds, `dist/main.js` exists.
 
 ```bash
 git add .
-git commit -m "chore: scaffold NestJS project with Node 24.16 and Swagger bootstrap"
+git commit -m "chore: scaffold NestJS 11 project with modern TS6 config"
 ```
 
 ---
@@ -310,13 +320,13 @@ volumes:
 
 `.env.example`:
 ```
-DATABASE_URL=postgresql://library:library@localhost:5432/library?schema=public
+DATABASE_URL=postgresql://library:library@localhost:5432/library
 PORT=3000
 ```
 
 `.env` (not committed):
 ```
-DATABASE_URL=postgresql://library:library@localhost:5432/library?schema=public
+DATABASE_URL=postgresql://library:library@localhost:5432/library
 PORT=3000
 ```
 
@@ -335,180 +345,243 @@ git commit -m "chore: add docker-compose for Postgres 18.4 and env example"
 
 ---
 
-## Task 3: Prisma schema, initial migration with tsvector column
+## Task 3: Drizzle schema, config, and initial migration
 
 **Files:**
-- Create: `prisma/schema.prisma`, `prisma/migrations/<ts>_init/migration.sql`
+- Create: `drizzle.config.ts`, `db/schema.ts`, `db/types.ts`, `db/migrations/...` (generated)
 
-- [ ] **Step 1: Initialize Prisma**
+- [ ] **Step 1: Create `drizzle.config.ts`**
 
-Run: `npx prisma init --datasource-provider postgresql`
+```ts
+import 'dotenv/config';
+import { defineConfig } from 'drizzle-kit';
 
-Then replace the generated `prisma/schema.prisma` with:
-
-```prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-enum ReservationStatus {
-  ACTIVE
-  CHECKED_OUT
-  RETURNED
-  CANCELLED
-}
-
-model Author {
-  id        String   @id @default(uuid()) @db.Uuid
-  name      String
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  books     Book[]
-
-  @@map("authors")
-}
-
-model Book {
-  id              String   @id @default(uuid()) @db.Uuid
-  title           String
-  authorId        String   @map("author_id") @db.Uuid
-  isbn            String   @unique
-  totalCopies     Int      @map("total_copies")
-  availableCopies Int      @map("available_copies")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  author       Author        @relation(fields: [authorId], references: [id])
-  reservations Reservation[]
-
-  @@index([authorId])
-  @@map("books")
-}
-
-model User {
-  id           String        @id @default(uuid()) @db.Uuid
-  email        String        @unique
-  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  reservations Reservation[]
-
-  @@map("users")
-}
-
-model Reservation {
-  id            String            @id @default(uuid()) @db.Uuid
-  bookId        String            @map("book_id") @db.Uuid
-  userId        String            @map("user_id") @db.Uuid
-  status        ReservationStatus
-  reservedAt    DateTime          @default(now()) @map("reserved_at") @db.Timestamptz(6)
-  checkedOutAt  DateTime?         @map("checked_out_at") @db.Timestamptz(6)
-  returnedAt    DateTime?         @map("returned_at") @db.Timestamptz(6)
-  cancelledAt   DateTime?         @map("cancelled_at") @db.Timestamptz(6)
-
-  book Book @relation(fields: [bookId], references: [id])
-  user User @relation(fields: [userId], references: [id])
-
-  @@index([bookId, status])
-  @@index([userId])
-  @@map("reservations")
-}
+export default defineConfig({
+  schema: './db/schema.ts',
+  out: './db/migrations',
+  dialect: 'postgresql',
+  dbCredentials: { url: process.env.DATABASE_URL! },
+  strict: true,
+  verbose: true,
+});
 ```
 
-- [ ] **Step 2: Generate the initial migration**
+Also add `dotenv` to runtime deps via:
+Run: `npm install dotenv`
 
-Run: `npx prisma migrate dev --name init --create-only`
-Expected: a file `prisma/migrations/<timestamp>_init/migration.sql` is created. Do NOT apply yet.
+- [ ] **Step 2: Create `db/schema.ts`**
 
-- [ ] **Step 3: Append the tsvector generated column, GIN index, and CHECK constraints to the migration**
+```ts
+import { relations, sql } from 'drizzle-orm';
+import {
+  check, customType, index, integer, pgEnum, pgTable, text, timestamp, uuid,
+} from 'drizzle-orm/pg-core';
 
-Append the following SQL to the end of the generated `migration.sql` file:
+export const reservationStatus = pgEnum('reservation_status', [
+  'ACTIVE',
+  'CHECKED_OUT',
+  'RETURNED',
+  'CANCELLED',
+]);
 
-```sql
--- Title-only search vector (author handled at query time)
-ALTER TABLE books
-  ADD COLUMN search_vector tsvector
-  GENERATED ALWAYS AS (setweight(to_tsvector('simple', title), 'A')) STORED;
+export const tsvector = customType<{ data: string }>({
+  dataType: () => 'tsvector',
+});
 
-CREATE INDEX books_search_idx ON books USING GIN (search_vector);
+export const authors = pgTable('authors', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+});
 
--- Copy invariants
-ALTER TABLE books
-  ADD CONSTRAINT books_total_copies_nonneg CHECK (total_copies >= 0),
-  ADD CONSTRAINT books_available_copies_bounds CHECK (
-    available_copies >= 0 AND available_copies <= total_copies
-  );
+export const books = pgTable(
+  'books',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    title: text('title').notNull(),
+    authorId: uuid('author_id')
+      .notNull()
+      .references(() => authors.id),
+    isbn: text('isbn').notNull().unique(),
+    totalCopies: integer('total_copies').notNull(),
+    availableCopies: integer('available_copies').notNull(),
+    searchVector: tsvector('search_vector').generatedAlwaysAs(
+      sql`setweight(to_tsvector('simple', title), 'A')`,
+      'stored',
+    ),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index('books_author_id_idx').on(t.authorId),
+    index('books_search_idx').using('gin', t.searchVector),
+    check('books_total_copies_nonneg', sql`${t.totalCopies} >= 0`),
+    check(
+      'books_available_copies_bounds',
+      sql`${t.availableCopies} >= 0 AND ${t.availableCopies} <= ${t.totalCopies}`,
+    ),
+  ],
+);
+
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  email: text('email').notNull().unique(),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+});
+
+export const reservations = pgTable(
+  'reservations',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bookId: uuid('book_id')
+      .notNull()
+      .references(() => books.id),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    status: reservationStatus('status').notNull(),
+    reservedAt: timestamp('reserved_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+    checkedOutAt: timestamp('checked_out_at', { withTimezone: true, mode: 'date' }),
+    returnedAt: timestamp('returned_at', { withTimezone: true, mode: 'date' }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true, mode: 'date' }),
+  },
+  (t) => [
+    index('reservations_book_status_idx').on(t.bookId, t.status),
+    index('reservations_user_idx').on(t.userId),
+  ],
+);
+
+export const authorsRelations = relations(authors, ({ many }) => ({
+  books: many(books),
+}));
+export const booksRelations = relations(books, ({ one, many }) => ({
+  author: one(authors, { fields: [books.authorId], references: [authors.id] }),
+  reservations: many(reservations),
+}));
+export const usersRelations = relations(users, ({ many }) => ({
+  reservations: many(reservations),
+}));
+export const reservationsRelations = relations(reservations, ({ one }) => ({
+  book: one(books, { fields: [reservations.bookId], references: [books.id] }),
+  user: one(users, { fields: [reservations.userId], references: [users.id] }),
+}));
 ```
 
-- [ ] **Step 4: Apply the migration and generate the Prisma client**
+- [ ] **Step 3: Create `db/types.ts`**
 
-Run: `npx prisma migrate dev`
-Run: `npx prisma generate`
-Expected: migration applied, `@prisma/client` regenerated, no errors.
+```ts
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import type * as schema from './schema';
 
-- [ ] **Step 5: Verify the schema in Postgres**
+export type Database = PostgresJsDatabase<typeof schema>;
+export type DbTransaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+```
+
+- [ ] **Step 4: Generate the initial migration**
+
+Run: `npm run db:generate`
+Expected: a file like `db/migrations/0000_<random>.sql` is created containing `CREATE TABLE`, `CREATE TYPE reservation_status …`, the tsvector generated column, GIN index, and check constraints. **No hand editing required.**
+
+- [ ] **Step 5: Inspect the generated SQL**
+
+Run: `cat db/migrations/0000_*.sql`
+Expected: contains all of:
+- `CREATE TYPE reservation_status AS ENUM ('ACTIVE','CHECKED_OUT','RETURNED','CANCELLED')`
+- `search_vector tsvector GENERATED ALWAYS AS (setweight(to_tsvector('simple', title), 'A')) STORED`
+- `CREATE INDEX "books_search_idx" ON "books" USING gin ("search_vector")`
+- Both `CHECK` constraints
+
+If the generated column is missing or malformed (older Drizzle Kit versions occasionally need a tweak), append the missing `ALTER TABLE` statements to the same migration file. Otherwise leave it untouched.
+
+- [ ] **Step 6: Apply the migration**
+
+Run: `npm run db:migrate`
+Expected: success, no errors.
+
+- [ ] **Step 7: Verify the schema in Postgres**
 
 Run: `docker compose exec db psql -U library -d library -c "\d books"`
 Expected: `search_vector` column visible with `tsvector` type and "stored generated" marker; `books_search_idx` listed.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add prisma/
-git commit -m "feat(db): initial Prisma schema with tsvector search column and constraints"
+git add db/ drizzle.config.ts package.json package-lock.json
+git commit -m "feat(db): Drizzle schema and initial migration with tsvector + checks"
 ```
 
 ---
 
-## Task 4: PrismaService and PrismaModule
+## Task 4: Drizzle DB module (DRIZZLE provider)
 
 **Files:**
-- Create: `src/prisma/prisma.service.ts`, `src/prisma/prisma.module.ts`
+- Create: `src/db/drizzle.token.ts`, `src/db/db.module.ts`
 - Modify: `src/app.module.ts`
 
-- [ ] **Step 1: Create `src/prisma/prisma.service.ts`**
+- [ ] **Step 1: Create `src/db/drizzle.token.ts`**
 
 ```ts
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+export const DRIZZLE = Symbol('DRIZZLE');
+```
 
-@Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
-  async onModuleInit(): Promise<void> {
-    await this.$connect();
-  }
-  async onModuleDestroy(): Promise<void> {
-    await this.$disconnect();
+- [ ] **Step 2: Create `src/db/db.module.ts`**
+
+```ts
+import { Global, Logger, Module, OnApplicationShutdown } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres, { Sql } from 'postgres';
+import * as schema from '../../db/schema';
+import { DRIZZLE } from './drizzle.token';
+
+const PG_CLIENT = Symbol('PG_CLIENT');
+
+@Global()
+@Module({
+  providers: [
+    {
+      provide: PG_CLIENT,
+      inject: [ConfigService],
+      useFactory: (cfg: ConfigService): Sql =>
+        postgres(cfg.getOrThrow<string>('DATABASE_URL'), { max: 10 }),
+    },
+    {
+      provide: DRIZZLE,
+      inject: [PG_CLIENT],
+      useFactory: (client: Sql) => drizzle(client, { schema }),
+    },
+  ],
+  exports: [DRIZZLE],
+})
+export class DbModule implements OnApplicationShutdown {
+  private readonly logger = new Logger(DbModule.name);
+  constructor() {}
+
+  async onApplicationShutdown(): Promise<void> {
+    this.logger.log('Closing Postgres client');
   }
 }
 ```
 
-- [ ] **Step 2: Create `src/prisma/prisma.module.ts`**
+- [ ] **Step 3: Register `DbModule` in `AppModule`**
 
-```ts
-import { Global, Module } from '@nestjs/common';
-import { PrismaService } from './prisma.service';
-
-@Global()
-@Module({
-  providers: [PrismaService],
-  exports: [PrismaService],
-})
-export class PrismaModule {}
-```
-
-- [ ] **Step 3: Register `PrismaModule` in `AppModule`**
-
-Modify `src/app.module.ts`:
 ```ts
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { PrismaModule } from './prisma/prisma.module';
+import { DbModule } from './db/db.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), PrismaModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule],
 })
 export class AppModule {}
 ```
@@ -521,18 +594,18 @@ Expected: success.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/prisma src/app.module.ts
-git commit -m "feat: add PrismaService and global PrismaModule"
+git add src/db src/app.module.ts
+git commit -m "feat(db): DbModule exposing DRIZZLE provider with postgres-js"
 ```
 
 ---
 
-## Task 5: PrismaExceptionFilter (with unit tests)
+## Task 5: DbExceptionFilter (with unit tests)
 
 **Files:**
-- Create: `src/common/filters/prisma-exception.filter.ts`, `src/common/filters/prisma-exception.filter.spec.ts`, `jest.config.ts`
+- Create: `src/common/filters/db-exception.filter.ts`, `src/common/filters/db-exception.filter.spec.ts`, `jest.config.ts`
 
-- [ ] **Step 1: Create `jest.config.ts` for unit tests**
+- [ ] **Step 1: Create `jest.config.ts`**
 
 ```ts
 import type { Config } from 'jest';
@@ -549,12 +622,12 @@ const config: Config = {
 export default config;
 ```
 
-- [ ] **Step 2: Write the failing test `prisma-exception.filter.spec.ts`**
+- [ ] **Step 2: Write failing test `db-exception.filter.spec.ts`**
 
 ```ts
 import { ArgumentsHost, HttpStatus } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { PrismaExceptionFilter } from './prisma-exception.filter';
+import { PostgresError } from 'postgres';
+import { DbExceptionFilter } from './db-exception.filter';
 
 function mockHost(): { host: ArgumentsHost; res: { status: jest.Mock; json: jest.Mock } } {
   const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
@@ -564,113 +637,115 @@ function mockHost(): { host: ArgumentsHost; res: { status: jest.Mock; json: jest
   return { host, res };
 }
 
-describe('PrismaExceptionFilter', () => {
-  const filter = new PrismaExceptionFilter();
+function pgError(code: string): PostgresError {
+  const err = Object.create(PostgresError.prototype) as PostgresError;
+  Object.assign(err, { code, message: `pg ${code}` });
+  return err;
+}
 
-  it('maps P2002 (unique violation) to 409', () => {
+describe('DbExceptionFilter', () => {
+  const filter = new DbExceptionFilter();
+
+  it.each([
+    ['23505', HttpStatus.CONFLICT],
+    ['23503', HttpStatus.CONFLICT],
+    ['23514', HttpStatus.BAD_REQUEST],
+  ])('maps Postgres code %s to status %i', (code, status) => {
     const { host, res } = mockHost();
-    const err = new Prisma.PrismaClientKnownRequestError('unique', {
-      code: 'P2002',
-      clientVersion: 'x',
-      meta: { target: ['isbn'] },
-    });
-    filter.catch(err, host);
-    expect(res.status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ statusCode: 409, error: 'Conflict' }),
-    );
+    filter.catch(pgError(code), host);
+    expect(res.status).toHaveBeenCalledWith(status);
   });
 
-  it('maps P2025 (not found) to 404', () => {
+  it('maps unknown Postgres errors to 500', () => {
     const { host, res } = mockHost();
-    const err = new Prisma.PrismaClientKnownRequestError('missing', {
-      code: 'P2025',
-      clientVersion: 'x',
-    });
-    filter.catch(err, host);
-    expect(res.status).toHaveBeenCalledWith(HttpStatus.NOT_FOUND);
-  });
-
-  it('maps unknown Prisma errors to 500', () => {
-    const { host, res } = mockHost();
-    const err = new Prisma.PrismaClientKnownRequestError('boom', {
-      code: 'P9999',
-      clientVersion: 'x',
-    });
-    filter.catch(err, host);
+    filter.catch(pgError('99999'), host);
     expect(res.status).toHaveBeenCalledWith(HttpStatus.INTERNAL_SERVER_ERROR);
   });
 });
 ```
 
-- [ ] **Step 3: Run the test, see it fail**
+- [ ] **Step 3: Run, see fail**
 
-Run: `npm run test:unit -- prisma-exception.filter`
+Run: `npm run test:unit -- db-exception.filter`
 Expected: FAIL — module not found.
 
-- [ ] **Step 4: Implement `prisma-exception.filter.ts`**
+- [ ] **Step 4: Implement `db-exception.filter.ts`**
 
 ```ts
 import { ArgumentsHost, Catch, ExceptionFilter, HttpStatus, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { Response } from 'express';
+import type { Response } from 'express';
+import { PostgresError } from 'postgres';
 
-@Catch(Prisma.PrismaClientKnownRequestError)
-export class PrismaExceptionFilter implements ExceptionFilter {
-  private readonly logger = new Logger(PrismaExceptionFilter.name);
+interface Mapping {
+  status: HttpStatus;
+  error: string;
+  message: string;
+}
 
-  catch(exception: Prisma.PrismaClientKnownRequestError, host: ArgumentsHost): void {
-    const ctx = host.switchToHttp();
-    const res = ctx.getResponse<Response>();
+const CODE_MAP: Record<string, Mapping> = {
+  '23505': { status: HttpStatus.CONFLICT, error: 'Conflict', message: 'Unique constraint violation' },
+  '23503': { status: HttpStatus.CONFLICT, error: 'Conflict', message: 'Foreign key constraint violation' },
+  '23514': { status: HttpStatus.BAD_REQUEST, error: 'Bad Request', message: 'Check constraint violation' },
+};
 
-    const mapping: Record<string, { status: HttpStatus; error: string; message: string }> = {
-      P2002: { status: HttpStatus.CONFLICT, error: 'Conflict', message: 'Unique constraint violation' },
-      P2025: { status: HttpStatus.NOT_FOUND, error: 'Not Found', message: 'Record not found' },
-    };
-    const m = mapping[exception.code] ?? {
-      status: HttpStatus.INTERNAL_SERVER_ERROR,
-      error: 'Internal Server Error',
-      message: 'Database error',
-    };
-    if (m.status >= 500) this.logger.error(exception);
-    res.status(m.status).json({ statusCode: m.status, error: m.error, message: m.message });
+const FALLBACK: Mapping = {
+  status: HttpStatus.INTERNAL_SERVER_ERROR,
+  error: 'Internal Server Error',
+  message: 'Database error',
+};
+
+@Catch(PostgresError)
+export class DbExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(DbExceptionFilter.name);
+
+  catch(exception: PostgresError, host: ArgumentsHost): void {
+    const res = host.switchToHttp().getResponse<Response>();
+    const mapping = CODE_MAP[exception.code] ?? FALLBACK;
+    if (mapping.status >= 500) this.logger.error(exception);
+    res
+      .status(mapping.status)
+      .json({ statusCode: mapping.status, error: mapping.error, message: mapping.message });
   }
 }
 ```
 
-- [ ] **Step 5: Re-run the test**
+- [ ] **Step 5: Re-run tests**
 
-Run: `npm run test:unit -- prisma-exception.filter`
-Expected: 3 passing.
+Run: `npm run test:unit -- db-exception.filter`
+Expected: 4 passing.
 
 - [ ] **Step 6: Register the filter globally in `main.ts`**
 
-In `src/main.ts`, add after the `ValidationPipe`:
+Append after `useGlobalPipes(...)`:
 ```ts
-import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter';
+import { DbExceptionFilter } from './common/filters/db-exception.filter';
 // ...
-app.useGlobalFilters(new PrismaExceptionFilter());
+app.useGlobalFilters(new DbExceptionFilter());
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/common/filters jest.config.ts src/main.ts
-git commit -m "feat(common): add PrismaExceptionFilter mapping P2002/P2025"
+git commit -m "feat(common): add DbExceptionFilter mapping Postgres 23505/23503/23514"
 ```
 
 ---
 
-## Task 6: UserExistsGuard and @CurrentUserId() decorator (with tests)
+## Task 6: UserExistsGuard (with `uuid.validate`) and @CurrentUserId() decorator
 
 **Files:**
 - Create: `src/common/guards/user-exists.guard.ts`, `src/common/guards/user-exists.guard.spec.ts`, `src/common/decorators/current-user-id.decorator.ts`
 
-- [ ] **Step 1: Write the failing test `user-exists.guard.spec.ts`**
+- [ ] **Step 1: Write failing test `user-exists.guard.spec.ts`**
 
 ```ts
 import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
+import { users } from '../../../db/schema';
 import { UserExistsGuard } from './user-exists.guard';
+
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
 
 function ctx(headers: Record<string, string | undefined>): ExecutionContext {
   return {
@@ -679,11 +754,11 @@ function ctx(headers: Record<string, string | undefined>): ExecutionContext {
 }
 
 describe('UserExistsGuard', () => {
-  const findUnique = jest.fn();
-  const prisma = { user: { findUnique } } as any;
-  const guard = new UserExistsGuard(prisma);
+  const findFirst = jest.fn();
+  const db = { query: { users: { findFirst } } } as any;
+  const guard = new UserExistsGuard(db);
 
-  beforeEach(() => findUnique.mockReset());
+  beforeEach(() => findFirst.mockReset());
 
   it('throws 401 when header is missing', async () => {
     await expect(guard.canActivate(ctx({}))).rejects.toBeInstanceOf(UnauthorizedException);
@@ -696,18 +771,20 @@ describe('UserExistsGuard', () => {
   });
 
   it('throws 401 when user is not in DB', async () => {
-    findUnique.mockResolvedValue(null);
-    await expect(
-      guard.canActivate(ctx({ 'x-user-id': '11111111-1111-1111-1111-111111111111' })),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    findFirst.mockResolvedValue(undefined);
+    await expect(guard.canActivate(ctx({ 'x-user-id': VALID_UUID }))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
   });
 
   it('returns true and attaches userId when user exists', async () => {
-    findUnique.mockResolvedValue({ id: '11111111-1111-1111-1111-111111111111' });
-    const c = ctx({ 'x-user-id': '11111111-1111-1111-1111-111111111111' });
+    findFirst.mockResolvedValue({ id: VALID_UUID });
+    const c = ctx({ 'x-user-id': VALID_UUID });
     await expect(guard.canActivate(c)).resolves.toBe(true);
-    expect((c.switchToHttp().getRequest() as any).userId).toBe(
-      '11111111-1111-1111-1111-111111111111',
+    expect((c.switchToHttp().getRequest() as any).userId).toBe(VALID_UUID);
+    // Sanity: the query used the expected where clause
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: eq(users.id, VALID_UUID) }),
     );
   });
 });
@@ -721,14 +798,18 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Implement `user-exists.guard.ts`**
 
 ```ts
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import {
+  CanActivate, ExecutionContext, Inject, Injectable, UnauthorizedException,
+} from '@nestjs/common';
+import { eq } from 'drizzle-orm';
+import { validate as isUUID } from 'uuid';
+import { users } from '../../../db/schema';
+import { DRIZZLE } from '../../db/drizzle.token';
+import type { Database } from '../../../db/types';
 
 @Injectable()
 export class UserExistsGuard implements CanActivate {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(@Inject(DRIZZLE) private readonly db: Database) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<{
@@ -736,10 +817,10 @@ export class UserExistsGuard implements CanActivate {
       userId?: string;
     }>();
     const headerVal = req.headers['x-user-id'];
-    if (!headerVal || !UUID_RE.test(headerVal)) {
+    if (!headerVal || !isUUID(headerVal)) {
       throw new UnauthorizedException('Missing or invalid X-User-Id header');
     }
-    const user = await this.prisma.user.findUnique({ where: { id: headerVal } });
+    const user = await this.db.query.users.findFirst({ where: eq(users.id, headerVal) });
     if (!user) throw new UnauthorizedException('Unknown user');
     req.userId = headerVal;
     return true;
@@ -770,7 +851,7 @@ Expected: 4 passing.
 
 ```bash
 git add src/common/guards src/common/decorators
-git commit -m "feat(common): add UserExistsGuard and @CurrentUserId() decorator"
+git commit -m "feat(common): UserExistsGuard with uuid.validate + @CurrentUserId()"
 ```
 
 ---
@@ -816,15 +897,15 @@ export interface PagedResult<T> {
 
 ```bash
 git add src/common/dto
-git commit -m "feat(common): add shared pagination DTO and PagedResult type"
+git commit -m "feat(common): shared pagination DTO and PagedResult type"
 ```
 
 ---
 
-## Task 8: Authors module — service with unit tests
+## Task 8: Authors module — repository
 
 **Files:**
-- Create: `src/authors/authors.service.ts`, `src/authors/authors.service.spec.ts`, `src/authors/dto/create-author.dto.ts`, `src/authors/dto/update-author.dto.ts`, `src/authors/dto/author.entity.ts`
+- Create: `src/authors/authors.repository.ts`, `src/authors/dto/{create-author.dto,update-author.dto,author.entity}.ts`
 
 - [ ] **Step 1: Create DTOs**
 
@@ -845,7 +926,7 @@ export class CreateAuthorDto {
 `src/authors/dto/update-author.dto.ts`:
 ```ts
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, MaxLength, IsNotEmpty } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class UpdateAuthorDto {
   @ApiPropertyOptional()
@@ -868,139 +949,222 @@ export class AuthorEntity {
 }
 ```
 
-- [ ] **Step 2: Write failing service tests `authors.service.spec.ts`**
+- [ ] **Step 2: Create `authors.repository.ts`**
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import { desc, eq } from 'drizzle-orm';
+import { authors } from '../../db/schema';
+import { DRIZZLE } from '../db/drizzle.token';
+import type { Database } from '../../db/types';
+import { AuthorEntity } from './dto/author.entity';
+
+@Injectable()
+export class AuthorsRepository {
+  constructor(@Inject(DRIZZLE) private readonly db: Database) {}
+
+  async findById(id: string): Promise<AuthorEntity | undefined> {
+    return this.db.query.authors.findFirst({ where: eq(authors.id, id) });
+  }
+
+  async findPaged(page: number, pageSize: number): Promise<{ items: AuthorEntity[]; total: number }> {
+    const [items, totalRow] = await Promise.all([
+      this.db
+        .select()
+        .from(authors)
+        .orderBy(desc(authors.createdAt))
+        .limit(pageSize)
+        .offset((page - 1) * pageSize),
+      this.db.$count(authors),
+    ]);
+    return { items, total: Number(totalRow) };
+  }
+
+  async create(data: { name: string }): Promise<AuthorEntity> {
+    const [row] = await this.db.insert(authors).values(data).returning();
+    return row!;
+  }
+
+  async update(id: string, data: { name?: string }): Promise<AuthorEntity | undefined> {
+    const [row] = await this.db.update(authors).set(data).where(eq(authors.id, id)).returning();
+    return row;
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.db.delete(authors).where(eq(authors.id, id));
+  }
+
+  async countBooksByAuthor(authorId: string): Promise<number> {
+    const result = await this.db.$count(
+      (await import('../../db/schema')).books,
+      eq((await import('../../db/schema')).books.authorId, authorId),
+    );
+    return Number(result);
+  }
+}
+```
+
+Note: the dynamic imports for `books` keep the repository's import surface scoped; for simplicity you can also import `books` at the top.
+
+Simpler alternative — replace `countBooksByAuthor` with the top-level form:
+```ts
+import { authors, books } from '../../db/schema';
+// ...
+async countBooksByAuthor(authorId: string): Promise<number> {
+  const c = await this.db.$count(books, eq(books.authorId, authorId));
+  return Number(c);
+}
+```
+
+- [ ] **Step 3: Build to verify**
+
+Run: `npm run build`
+Expected: success.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/authors
+git commit -m "feat(authors): repository and DTOs"
+```
+
+---
+
+## Task 9: Authors module — service with unit tests
+
+**Files:**
+- Create: `src/authors/authors.service.ts`, `src/authors/authors.service.spec.ts`
+
+- [ ] **Step 1: Write failing service tests `authors.service.spec.ts`**
 
 ```ts
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import { AuthorsRepository } from './authors.repository';
 import { AuthorsService } from './authors.service';
 
-function makePrisma() {
+function makeRepo(): jest.Mocked<AuthorsRepository> {
   return {
-    author: {
-      create: jest.fn(),
-      findUnique: jest.fn(),
-      findMany: jest.fn(),
-      count: jest.fn(),
-      update: jest.fn(),
-      delete: jest.fn(),
-    },
-    book: { count: jest.fn() },
-  };
+    findById: jest.fn(),
+    findPaged: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    countBooksByAuthor: jest.fn(),
+  } as unknown as jest.Mocked<AuthorsRepository>;
 }
 
 describe('AuthorsService', () => {
-  let prisma: ReturnType<typeof makePrisma>;
+  let repo: jest.Mocked<AuthorsRepository>;
   let svc: AuthorsService;
 
   beforeEach(() => {
-    prisma = makePrisma();
-    svc = new AuthorsService(prisma as any);
+    repo = makeRepo();
+    svc = new AuthorsService(repo);
   });
 
   it('creates an author', async () => {
-    prisma.author.create.mockResolvedValue({ id: 'a1', name: 'X', createdAt: new Date() });
+    repo.create.mockResolvedValue({ id: 'a1', name: 'X', createdAt: new Date() });
     const out = await svc.create({ name: 'X' });
     expect(out.name).toBe('X');
-    expect(prisma.author.create).toHaveBeenCalledWith({ data: { name: 'X' } });
+    expect(repo.create).toHaveBeenCalledWith({ name: 'X' });
   });
 
   it('returns 404 when getting an unknown author', async () => {
-    prisma.author.findUnique.mockResolvedValue(null);
+    repo.findById.mockResolvedValue(undefined);
     await expect(svc.findOne('missing')).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('lists authors with pagination', async () => {
-    prisma.author.findMany.mockResolvedValue([{ id: '1', name: 'A', createdAt: new Date() }]);
-    prisma.author.count.mockResolvedValue(1);
+    repo.findPaged.mockResolvedValue({
+      items: [{ id: '1', name: 'A', createdAt: new Date() }],
+      total: 1,
+    });
     const out = await svc.findAll({ page: 1, pageSize: 20 });
     expect(out.total).toBe(1);
     expect(out.items).toHaveLength(1);
   });
 
   it('refuses to delete an author with books', async () => {
-    prisma.book.count.mockResolvedValue(2);
+    repo.findById.mockResolvedValue({ id: 'a1', name: 'X', createdAt: new Date() });
+    repo.countBooksByAuthor.mockResolvedValue(2);
     await expect(svc.remove('a1')).rejects.toBeInstanceOf(ConflictException);
-    expect(prisma.author.delete).not.toHaveBeenCalled();
+    expect(repo.delete).not.toHaveBeenCalled();
   });
 
   it('deletes an author with no books', async () => {
-    prisma.book.count.mockResolvedValue(0);
-    prisma.author.delete.mockResolvedValue({});
-    await expect(svc.remove('a1')).resolves.toBeUndefined();
-    expect(prisma.author.delete).toHaveBeenCalledWith({ where: { id: 'a1' } });
+    repo.findById.mockResolvedValue({ id: 'a1', name: 'X', createdAt: new Date() });
+    repo.countBooksByAuthor.mockResolvedValue(0);
+    await svc.remove('a1');
+    expect(repo.delete).toHaveBeenCalledWith('a1');
   });
 });
 ```
 
-- [ ] **Step 3: Run, see fail**
+- [ ] **Step 2: Run, see fail**
 
 Run: `npm run test:unit -- authors.service`
-Expected: FAIL — module not found.
+Expected: FAIL.
 
-- [ ] **Step 4: Implement `authors.service.ts`**
+- [ ] **Step 3: Implement `authors.service.ts`**
 
 ```ts
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
 import { PagedResult, PaginationQueryDto } from '../common/dto/pagination.dto';
+import { AuthorsRepository } from './authors.repository';
 import { AuthorEntity } from './dto/author.entity';
 import { CreateAuthorDto } from './dto/create-author.dto';
 import { UpdateAuthorDto } from './dto/update-author.dto';
 
 @Injectable()
 export class AuthorsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly repo: AuthorsRepository) {}
 
   async create(dto: CreateAuthorDto): Promise<AuthorEntity> {
-    return this.prisma.author.create({ data: { name: dto.name } });
+    return this.repo.create({ name: dto.name });
   }
 
   async findOne(id: string): Promise<AuthorEntity> {
-    const a = await this.prisma.author.findUnique({ where: { id } });
+    const a = await this.repo.findById(id);
     if (!a) throw new NotFoundException('Author not found');
     return a;
   }
 
   async findAll(q: PaginationQueryDto): Promise<PagedResult<AuthorEntity>> {
-    const [items, total] = await Promise.all([
-      this.prisma.author.findMany({
-        skip: (q.page - 1) * q.pageSize,
-        take: q.pageSize,
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.author.count(),
-    ]);
+    const { items, total } = await this.repo.findPaged(q.page, q.pageSize);
     return { items, total, page: q.page, pageSize: q.pageSize };
   }
 
   async update(id: string, dto: UpdateAuthorDto): Promise<AuthorEntity> {
     await this.findOne(id);
-    return this.prisma.author.update({ where: { id }, data: dto });
+    const updated = await this.repo.update(id, dto);
+    if (!updated) throw new NotFoundException('Author not found');
+    return updated;
   }
 
   async remove(id: string): Promise<void> {
-    const bookCount = await this.prisma.book.count({ where: { authorId: id } });
-    if (bookCount > 0) throw new ConflictException('Author has books');
-    await this.prisma.author.delete({ where: { id } });
+    await this.findOne(id);
+    const books = await this.repo.countBooksByAuthor(id);
+    if (books > 0) throw new ConflictException('Author has books');
+    await this.repo.delete(id);
   }
 }
 ```
 
-- [ ] **Step 5: Re-run tests**
+- [ ] **Step 4: Re-run tests**
 
 Run: `npm run test:unit -- authors.service`
 Expected: 5 passing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/authors
-git commit -m "feat(authors): add AuthorsService with CRUD and book-link guard"
+git add src/authors/authors.service.ts src/authors/authors.service.spec.ts
+git commit -m "feat(authors): service with CRUD + book-link guard, unit tests"
 ```
 
 ---
 
-## Task 9: Authors controller and module
+## Task 10: Authors controller and module
 
 **Files:**
 - Create: `src/authors/authors.controller.ts`, `src/authors/authors.module.ts`
@@ -1010,8 +1174,7 @@ git commit -m "feat(authors): add AuthorsService with CRUD and book-link guard"
 
 ```ts
 import {
-  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe,
-  Patch, Post, Query,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { PaginationQueryDto } from '../common/dto/pagination.dto';
@@ -1024,22 +1187,18 @@ import { UpdateAuthorDto } from './dto/update-author.dto';
 export class AuthorsController {
   constructor(private readonly svc: AuthorsService) {}
 
-  @Post()
-  create(@Body() dto: CreateAuthorDto) { return this.svc.create(dto); }
+  @Post() create(@Body() dto: CreateAuthorDto) { return this.svc.create(dto); }
 
-  @Get()
-  findAll(@Query() q: PaginationQueryDto) { return this.svc.findAll(q); }
+  @Get() findAll(@Query() q: PaginationQueryDto) { return this.svc.findAll(q); }
 
-  @Get(':id')
-  findOne(@Param('id', ParseUUIDPipe) id: string) { return this.svc.findOne(id); }
+  @Get(':id') findOne(@Param('id', ParseUUIDPipe) id: string) { return this.svc.findOne(id); }
 
   @Patch(':id')
   update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateAuthorDto) {
     return this.svc.update(id, dto);
   }
 
-  @Delete(':id')
-  @HttpCode(204)
+  @Delete(':id') @HttpCode(204)
   remove(@Param('id', ParseUUIDPipe) id: string) { return this.svc.remove(id); }
 }
 ```
@@ -1049,19 +1208,34 @@ export class AuthorsController {
 ```ts
 import { Module } from '@nestjs/common';
 import { AuthorsController } from './authors.controller';
+import { AuthorsRepository } from './authors.repository';
 import { AuthorsService } from './authors.service';
 
 @Module({
   controllers: [AuthorsController],
-  providers: [AuthorsService],
-  exports: [AuthorsService],
+  providers: [AuthorsService, AuthorsRepository],
+  exports: [AuthorsService, AuthorsRepository],
 })
 export class AuthorsModule {}
 ```
 
-- [ ] **Step 3: Register in `AppModule`**
+- [ ] **Step 3: Register `AuthorsModule` in `AppModule`**
 
-Update `src/app.module.ts` imports to include `AuthorsModule`.
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { AuthorsModule } from './authors/authors.module';
+import { DbModule } from './db/db.module';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    DbModule,
+    AuthorsModule,
+  ],
+})
+export class AppModule {}
+```
 
 - [ ] **Step 4: Build to verify**
 
@@ -1072,15 +1246,15 @@ Expected: success.
 
 ```bash
 git add src/authors src/app.module.ts
-git commit -m "feat(authors): add controller, module, and Swagger tags"
+git commit -m "feat(authors): controller and module"
 ```
 
 ---
 
-## Task 10: Books service with unit tests
+## Task 11: Books module — repository
 
 **Files:**
-- Create: `src/books/books.service.ts`, `src/books/books.service.spec.ts`, `src/books/dto/{create-book.dto,update-book.dto,book.entity}.ts`
+- Create: `src/books/books.repository.ts`, `src/books/dto/{create-book.dto,update-book.dto,book.entity,list-books.query}.ts`
 
 - [ ] **Step 1: Create DTOs**
 
@@ -1090,23 +1264,10 @@ import { ApiProperty } from '@nestjs/swagger';
 import { IsInt, IsISBN, IsNotEmpty, IsString, IsUUID, Min } from 'class-validator';
 
 export class CreateBookDto {
-  @ApiProperty()
-  @IsString()
-  @IsNotEmpty()
-  title!: string;
-
-  @ApiProperty({ format: 'uuid' })
-  @IsUUID()
-  authorId!: string;
-
-  @ApiProperty({ description: 'ISBN-10 or ISBN-13' })
-  @IsISBN()
-  isbn!: string;
-
-  @ApiProperty({ minimum: 0 })
-  @IsInt()
-  @Min(0)
-  totalCopies!: number;
+  @ApiProperty() @IsString() @IsNotEmpty() title!: string;
+  @ApiProperty({ format: 'uuid' }) @IsUUID() authorId!: string;
+  @ApiProperty({ description: 'ISBN-10 or ISBN-13' }) @IsISBN() isbn!: string;
+  @ApiProperty({ minimum: 0 }) @IsInt() @Min(0) totalCopies!: number;
 }
 ```
 
@@ -1142,148 +1303,258 @@ export class BookEntity {
 }
 ```
 
-- [ ] **Step 2: Write failing service tests `books.service.spec.ts`**
+`src/books/dto/list-books.query.ts`:
+```ts
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsUUID } from 'class-validator';
+import { PaginationQueryDto } from '../../common/dto/pagination.dto';
+
+export class ListBooksQueryDto extends PaginationQueryDto {
+  @ApiPropertyOptional({ format: 'uuid' }) @IsOptional() @IsUUID() authorId?: string;
+}
+```
+
+- [ ] **Step 2: Create `books.repository.ts`**
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import { and, desc, eq, inArray } from 'drizzle-orm';
+import { authors, books, reservations } from '../../db/schema';
+import { DRIZZLE } from '../db/drizzle.token';
+import type { Database } from '../../db/types';
+import { BookEntity } from './dto/book.entity';
+
+export interface BookWriteData {
+  title: string;
+  authorId: string;
+  isbn: string;
+  totalCopies: number;
+  availableCopies: number;
+}
+
+export interface BookPatchData {
+  title?: string;
+  authorId?: string;
+  isbn?: string;
+  totalCopies?: number;
+  availableCopies?: number;
+  updatedAt?: Date;
+}
+
+@Injectable()
+export class BooksRepository {
+  constructor(@Inject(DRIZZLE) private readonly db: Database) {}
+
+  async findById(id: string): Promise<BookEntity | undefined> {
+    return this.db.query.books.findFirst({
+      where: eq(books.id, id),
+      with: { author: true },
+    });
+  }
+
+  async findAuthor(id: string): Promise<{ id: string } | undefined> {
+    return this.db.query.authors.findFirst({ where: eq(authors.id, id), columns: { id: true } });
+  }
+
+  async findPaged(
+    page: number,
+    pageSize: number,
+    authorId: string | undefined,
+  ): Promise<{ items: BookEntity[]; total: number }> {
+    const where = authorId ? eq(books.authorId, authorId) : undefined;
+    const [items, total] = await Promise.all([
+      this.db.query.books.findMany({
+        where,
+        orderBy: desc(books.createdAt),
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+        with: { author: true },
+      }),
+      this.db.$count(books, where),
+    ]);
+    return { items, total: Number(total) };
+  }
+
+  async create(data: BookWriteData): Promise<BookEntity> {
+    const [row] = await this.db.insert(books).values(data).returning();
+    return this.findById(row!.id) as Promise<BookEntity>;
+  }
+
+  async update(id: string, data: BookPatchData): Promise<BookEntity | undefined> {
+    const [row] = await this.db
+      .update(books)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(books.id, id))
+      .returning();
+    if (!row) return undefined;
+    return this.findById(row.id);
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.db.delete(books).where(eq(books.id, id));
+  }
+
+  async countActiveReservations(bookId: string): Promise<number> {
+    const c = await this.db.$count(
+      reservations,
+      and(eq(reservations.bookId, bookId), inArray(reservations.status, ['ACTIVE', 'CHECKED_OUT'])),
+    );
+    return Number(c);
+  }
+}
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/books
+git commit -m "feat(books): repository and DTOs"
+```
+
+---
+
+## Task 12: Books module — service with unit tests
+
+**Files:**
+- Create: `src/books/books.service.ts`, `src/books/books.service.spec.ts`
+
+- [ ] **Step 1: Write failing tests `books.service.spec.ts`**
 
 ```ts
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BooksRepository } from './books.repository';
 import { BooksService } from './books.service';
 
-function makePrisma() {
+function makeRepo(): jest.Mocked<BooksRepository> {
   return {
-    book: {
-      create: jest.fn(),
-      findUnique: jest.fn(),
-      findMany: jest.fn(),
-      count: jest.fn(),
-      update: jest.fn(),
-      delete: jest.fn(),
-    },
-    reservation: { count: jest.fn() },
-    author: { findUnique: jest.fn() },
-  };
+    findById: jest.fn(),
+    findAuthor: jest.fn(),
+    findPaged: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    countActiveReservations: jest.fn(),
+  } as unknown as jest.Mocked<BooksRepository>;
 }
 
 describe('BooksService', () => {
-  let prisma: ReturnType<typeof makePrisma>;
+  let repo: jest.Mocked<BooksRepository>;
   let svc: BooksService;
 
   beforeEach(() => {
-    prisma = makePrisma();
-    svc = new BooksService(prisma as any);
+    repo = makeRepo();
+    svc = new BooksService(repo);
   });
 
   it('creates a book with availableCopies = totalCopies', async () => {
-    prisma.author.findUnique.mockResolvedValue({ id: 'a1' });
-    prisma.book.create.mockImplementation(({ data }: any) => Promise.resolve({ ...data, id: 'b1' }));
+    repo.findAuthor.mockResolvedValue({ id: 'a1' });
+    repo.create.mockImplementation((data) =>
+      Promise.resolve({ ...data, id: 'b1', createdAt: new Date(), updatedAt: new Date() } as any),
+    );
     const out = await svc.create({ title: 'T', authorId: 'a1', isbn: '9780132350884', totalCopies: 3 });
     expect(out.availableCopies).toBe(3);
-    expect(prisma.book.create).toHaveBeenCalledWith({
-      data: { title: 'T', authorId: 'a1', isbn: '9780132350884', totalCopies: 3, availableCopies: 3 },
+    expect(repo.create).toHaveBeenCalledWith({
+      title: 'T', authorId: 'a1', isbn: '9780132350884', totalCopies: 3, availableCopies: 3,
     });
   });
 
   it('rejects create when author does not exist', async () => {
-    prisma.author.findUnique.mockResolvedValue(null);
+    repo.findAuthor.mockResolvedValue(undefined);
     await expect(
       svc.create({ title: 'T', authorId: 'a1', isbn: '9780132350884', totalCopies: 1 }),
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('returns 404 on unknown id', async () => {
-    prisma.book.findUnique.mockResolvedValue(null);
+    repo.findById.mockResolvedValue(undefined);
     await expect(svc.findOne('x')).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('rejects totalCopies update that would drive availableCopies negative', async () => {
-    prisma.book.findUnique.mockResolvedValue({
-      id: 'b1', totalCopies: 5, availableCopies: 1,
-    });
-    // 5 - 1 = 4 copies are in use; new totalCopies=3 would leave -1 available
+    repo.findById.mockResolvedValue({
+      id: 'b1', title: '', authorId: 'a1', isbn: '', totalCopies: 5, availableCopies: 1,
+      createdAt: new Date(), updatedAt: new Date(),
+    } as any);
     await expect(svc.update('b1', { totalCopies: 3 })).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('applies delta to availableCopies when increasing totalCopies', async () => {
-    prisma.book.findUnique.mockResolvedValue({
-      id: 'b1', totalCopies: 5, availableCopies: 2,
-    });
-    prisma.book.update.mockImplementation(({ data }: any) =>
-      Promise.resolve({ id: 'b1', totalCopies: 5, availableCopies: 2, ...data }),
-    );
+    repo.findById.mockResolvedValueOnce({
+      id: 'b1', title: '', authorId: 'a1', isbn: '', totalCopies: 5, availableCopies: 2,
+      createdAt: new Date(), updatedAt: new Date(),
+    } as any);
+    repo.update.mockResolvedValue({
+      id: 'b1', title: '', authorId: 'a1', isbn: '', totalCopies: 7, availableCopies: 4,
+      createdAt: new Date(), updatedAt: new Date(),
+    } as any);
     const out = await svc.update('b1', { totalCopies: 7 });
     expect(out.totalCopies).toBe(7);
-    expect(out.availableCopies).toBe(4); // 2 + (7-5)
+    expect(out.availableCopies).toBe(4);
+    expect(repo.update).toHaveBeenCalledWith('b1', { totalCopies: 7, availableCopies: 4 });
   });
 
   it('refuses to delete a book with non-terminal reservations', async () => {
-    prisma.reservation.count.mockResolvedValue(1);
+    repo.findById.mockResolvedValue({
+      id: 'b1', title: '', authorId: 'a1', isbn: '', totalCopies: 1, availableCopies: 1,
+      createdAt: new Date(), updatedAt: new Date(),
+    } as any);
+    repo.countActiveReservations.mockResolvedValue(1);
     await expect(svc.remove('b1')).rejects.toBeInstanceOf(ConflictException);
+    expect(repo.delete).not.toHaveBeenCalled();
   });
 });
 ```
 
-- [ ] **Step 3: Run, see fail**
+- [ ] **Step 2: Run, see fail**
 
 Run: `npm run test:unit -- books.service`
-Expected: FAIL — module not found.
+Expected: FAIL.
 
-- [ ] **Step 4: Implement `books.service.ts`**
+- [ ] **Step 3: Implement `books.service.ts`**
 
 ```ts
 import {
   BadRequestException, ConflictException, Injectable, NotFoundException,
 } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { PagedResult, PaginationQueryDto } from '../common/dto/pagination.dto';
-import { CreateBookDto } from './dto/create-book.dto';
-import { UpdateBookDto } from './dto/update-book.dto';
+import { PagedResult } from '../common/dto/pagination.dto';
+import { BooksRepository } from './books.repository';
 import { BookEntity } from './dto/book.entity';
+import { CreateBookDto } from './dto/create-book.dto';
+import { ListBooksQueryDto } from './dto/list-books.query';
+import { UpdateBookDto } from './dto/update-book.dto';
 
 @Injectable()
 export class BooksService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly repo: BooksRepository) {}
 
   async create(dto: CreateBookDto): Promise<BookEntity> {
-    const author = await this.prisma.author.findUnique({ where: { id: dto.authorId } });
+    const author = await this.repo.findAuthor(dto.authorId);
     if (!author) throw new NotFoundException('Author not found');
-    return this.prisma.book.create({
-      data: {
-        title: dto.title,
-        authorId: dto.authorId,
-        isbn: dto.isbn,
-        totalCopies: dto.totalCopies,
-        availableCopies: dto.totalCopies,
-      },
+    return this.repo.create({
+      title: dto.title,
+      authorId: dto.authorId,
+      isbn: dto.isbn,
+      totalCopies: dto.totalCopies,
+      availableCopies: dto.totalCopies,
     });
   }
 
   async findOne(id: string): Promise<BookEntity> {
-    const b = await this.prisma.book.findUnique({ where: { id }, include: { author: true } });
+    const b = await this.repo.findById(id);
     if (!b) throw new NotFoundException('Book not found');
     return b;
   }
 
-  async findAll(
-    q: PaginationQueryDto & { authorId?: string },
-  ): Promise<PagedResult<BookEntity>> {
-    const where = q.authorId ? { authorId: q.authorId } : {};
-    const [items, total] = await Promise.all([
-      this.prisma.book.findMany({
-        where,
-        skip: (q.page - 1) * q.pageSize,
-        take: q.pageSize,
-        orderBy: { createdAt: 'desc' },
-        include: { author: true },
-      }),
-      this.prisma.book.count({ where }),
-    ]);
+  async findAll(q: ListBooksQueryDto): Promise<PagedResult<BookEntity>> {
+    const { items, total } = await this.repo.findPaged(q.page, q.pageSize, q.authorId);
     return { items, total, page: q.page, pageSize: q.pageSize };
   }
 
   async update(id: string, dto: UpdateBookDto): Promise<BookEntity> {
-    const current = await this.prisma.book.findUnique({ where: { id } });
+    const current = await this.repo.findById(id);
     if (!current) throw new NotFoundException('Book not found');
 
-    const data: Record<string, unknown> = { ...dto };
+    const patch: Record<string, unknown> = { ...dto };
     if (dto.totalCopies !== undefined) {
       const delta = dto.totalCopies - current.totalCopies;
       const newAvailable = current.availableCopies + delta;
@@ -1292,73 +1563,53 @@ export class BooksService {
           'totalCopies cannot be reduced below the number of copies currently in use',
         );
       }
-      data.availableCopies = newAvailable;
+      patch.availableCopies = newAvailable;
     }
-    return this.prisma.book.update({
-      where: { id },
-      data,
-      include: { author: true },
-    });
+    const updated = await this.repo.update(id, patch);
+    if (!updated) throw new NotFoundException('Book not found');
+    return updated;
   }
 
   async remove(id: string): Promise<void> {
-    const active = await this.prisma.reservation.count({
-      where: { bookId: id, status: { in: ['ACTIVE', 'CHECKED_OUT'] } },
-    });
+    await this.findOne(id);
+    const active = await this.repo.countActiveReservations(id);
     if (active > 0) throw new ConflictException('Book has active reservations');
-    await this.prisma.book.delete({ where: { id } });
+    await this.repo.delete(id);
   }
 }
 ```
 
-- [ ] **Step 5: Re-run tests**
+- [ ] **Step 4: Re-run tests**
 
 Run: `npm run test:unit -- books.service`
 Expected: 6 passing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/books
-git commit -m "feat(books): add BooksService with copy-count invariants"
+git add src/books/books.service.ts src/books/books.service.spec.ts
+git commit -m "feat(books): service with copy-count invariants, unit tests"
 ```
 
 ---
 
-## Task 11: Books controller and module
+## Task 13: Books controller and module
 
 **Files:**
-- Create: `src/books/books.controller.ts`, `src/books/books.module.ts`, `src/books/dto/list-books.query.ts`
+- Create: `src/books/books.controller.ts`, `src/books/books.module.ts`
 - Modify: `src/app.module.ts`
 
-- [ ] **Step 1: Create list query DTO**
-
-`src/books/dto/list-books.query.ts`:
-```ts
-import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsUUID } from 'class-validator';
-import { PaginationQueryDto } from '../../common/dto/pagination.dto';
-
-export class ListBooksQueryDto extends PaginationQueryDto {
-  @ApiPropertyOptional({ format: 'uuid' })
-  @IsOptional()
-  @IsUUID()
-  authorId?: string;
-}
-```
-
-- [ ] **Step 2: Create `books.controller.ts`**
+- [ ] **Step 1: Create `books.controller.ts`**
 
 ```ts
 import {
-  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe,
-  Patch, Post, Query,
+  Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { BooksService } from './books.service';
 import { CreateBookDto } from './dto/create-book.dto';
-import { UpdateBookDto } from './dto/update-book.dto';
 import { ListBooksQueryDto } from './dto/list-books.query';
+import { UpdateBookDto } from './dto/update-book.dto';
 
 @ApiTags('books')
 @Controller('books')
@@ -1366,9 +1617,7 @@ export class BooksController {
   constructor(private readonly svc: BooksService) {}
 
   @Post() create(@Body() dto: CreateBookDto) { return this.svc.create(dto); }
-
   @Get() findAll(@Query() q: ListBooksQueryDto) { return this.svc.findAll(q); }
-
   @Get(':id') findOne(@Param('id', ParseUUIDPipe) id: string) { return this.svc.findOne(id); }
 
   @Patch(':id')
@@ -1381,40 +1630,41 @@ export class BooksController {
 }
 ```
 
-- [ ] **Step 3: Create `books.module.ts`**
+- [ ] **Step 2: Create `books.module.ts`**
 
 ```ts
 import { Module } from '@nestjs/common';
 import { BooksController } from './books.controller';
+import { BooksRepository } from './books.repository';
 import { BooksService } from './books.service';
 
 @Module({
   controllers: [BooksController],
-  providers: [BooksService],
-  exports: [BooksService],
+  providers: [BooksService, BooksRepository],
+  exports: [BooksService, BooksRepository],
 })
 export class BooksModule {}
 ```
 
-- [ ] **Step 4: Register in `AppModule`**
+- [ ] **Step 3: Register in `AppModule`**
 
-Add `BooksModule` to `imports` in `src/app.module.ts`.
+Add `BooksModule` to the imports array.
 
-- [ ] **Step 5: Build to verify**
+- [ ] **Step 4: Build**
 
 Run: `npm run build`
 Expected: success.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/books src/app.module.ts
-git commit -m "feat(books): add controller and module"
+git commit -m "feat(books): controller and module"
 ```
 
 ---
 
-## Task 12: Reservation FSM (pure function with exhaustive tests)
+## Task 14: Reservation FSM (pure function with exhaustive tests)
 
 **Files:**
 - Create: `src/reservations/transition.ts`, `src/reservations/transition.spec.ts`
@@ -1423,12 +1673,12 @@ git commit -m "feat(books): add controller and module"
 
 ```ts
 import { reservationTransition, ReservationAction } from './transition';
-import { ReservationStatus } from '@prisma/client';
 
-const ALL_STATUSES: ReservationStatus[] = ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'];
+type Status = 'ACTIVE' | 'CHECKED_OUT' | 'RETURNED' | 'CANCELLED';
+const ALL_STATUSES: Status[] = ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'];
 const ALL_ACTIONS: ReservationAction[] = ['check_out', 'return', 'cancel'];
 
-const legal: Array<[ReservationStatus, ReservationAction, ReservationStatus]> = [
+const legal: Array<[Status, ReservationAction, Status]> = [
   ['ACTIVE',      'check_out', 'CHECKED_OUT'],
   ['ACTIVE',      'cancel',    'CANCELLED'],
   ['CHECKED_OUT', 'return',    'RETURNED'],
@@ -1460,8 +1710,8 @@ Expected: FAIL.
 
 ```ts
 import { ConflictException } from '@nestjs/common';
-import { ReservationStatus } from '@prisma/client';
 
+export type ReservationStatus = 'ACTIVE' | 'CHECKED_OUT' | 'RETURNED' | 'CANCELLED';
 export type ReservationAction = 'check_out' | 'return' | 'cancel';
 
 const TABLE: Partial<Record<ReservationStatus, Partial<Record<ReservationAction, ReservationStatus>>>> = {
@@ -1481,24 +1731,24 @@ export function reservationTransition(
 }
 ```
 
-- [ ] **Step 4: Re-run tests**
+- [ ] **Step 4: Re-run**
 
 Run: `npm run test:unit -- transition`
-Expected: 4 passing (3 legal cases + 1 illegal-matrix test).
+Expected: 4 passing.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/reservations/transition.ts src/reservations/transition.spec.ts
-git commit -m "feat(reservations): add pure FSM with exhaustive transition tests"
+git commit -m "feat(reservations): pure FSM with exhaustive transition tests"
 ```
 
 ---
 
-## Task 13: ReservationsService — atomic UPDATE with unit tests
+## Task 15: Reservations module — repository (with atomic UPDATE)
 
 **Files:**
-- Create: `src/reservations/reservations.service.ts`, `src/reservations/reservations.service.spec.ts`, `src/reservations/dto/{create-reservation.dto,reservation.entity,list-reservations.query}.ts`
+- Create: `src/reservations/reservations.repository.ts`, `src/reservations/dto/{create-reservation.dto,reservation.entity,list-reservations.query}.ts`
 
 - [ ] **Step 1: Create DTOs**
 
@@ -1508,16 +1758,14 @@ import { ApiProperty } from '@nestjs/swagger';
 import { IsUUID } from 'class-validator';
 
 export class CreateReservationDto {
-  @ApiProperty({ format: 'uuid' })
-  @IsUUID()
-  bookId!: string;
+  @ApiProperty({ format: 'uuid' }) @IsUUID() bookId!: string;
 }
 ```
 
 `src/reservations/dto/reservation.entity.ts`:
 ```ts
 import { ApiProperty } from '@nestjs/swagger';
-import { ReservationStatus } from '@prisma/client';
+import { ReservationStatus } from '../transition';
 
 export class ReservationEntity {
   @ApiProperty() id!: string;
@@ -1536,65 +1784,189 @@ export class ReservationEntity {
 ```ts
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional, IsUUID } from 'class-validator';
-import { ReservationStatus } from '@prisma/client';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
+import { ReservationStatus } from '../transition';
+
+const STATUSES = ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'] as const;
 
 export class ListReservationsQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({ format: 'uuid' }) @IsOptional() @IsUUID() userId?: string;
   @ApiPropertyOptional({ format: 'uuid' }) @IsOptional() @IsUUID() bookId?: string;
-  @ApiPropertyOptional({ enum: ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'] })
-  @IsOptional() @IsEnum(['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'] as const)
+  @ApiPropertyOptional({ enum: STATUSES })
+  @IsOptional() @IsEnum(STATUSES)
   status?: ReservationStatus;
 }
 ```
 
-- [ ] **Step 2: Write failing tests `reservations.service.spec.ts`**
+- [ ] **Step 2: Create `reservations.repository.ts`**
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import { and, desc, eq, sql, SQL } from 'drizzle-orm';
+import { books, reservations } from '../../db/schema';
+import { DRIZZLE } from '../db/drizzle.token';
+import type { Database, DbTransaction } from '../../db/types';
+import { ReservationEntity } from './dto/reservation.entity';
+import { ReservationStatus } from './transition';
+
+export interface CreateAtomicResult {
+  reservation: ReservationEntity;
+}
+
+@Injectable()
+export class ReservationsRepository {
+  constructor(@Inject(DRIZZLE) private readonly db: Database) {}
+
+  async findById(id: string): Promise<ReservationEntity | undefined> {
+    return this.db.query.reservations.findFirst({ where: eq(reservations.id, id) });
+  }
+
+  async findPaged(
+    page: number,
+    pageSize: number,
+    filter: { userId?: string; bookId?: string; status?: ReservationStatus },
+  ): Promise<{ items: ReservationEntity[]; total: number }> {
+    const conds: SQL[] = [];
+    if (filter.userId) conds.push(eq(reservations.userId, filter.userId));
+    if (filter.bookId) conds.push(eq(reservations.bookId, filter.bookId));
+    if (filter.status) conds.push(eq(reservations.status, filter.status));
+    const where = conds.length ? and(...conds) : undefined;
+
+    const [items, total] = await Promise.all([
+      this.db.query.reservations.findMany({
+        where,
+        orderBy: desc(reservations.reservedAt),
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      }),
+      this.db.$count(reservations, where),
+    ]);
+    return { items, total: Number(total) };
+  }
+
+  /** Decrements available_copies atomically. Returns false if no copies available. */
+  async tryDecrementAvailable(tx: DbTransaction, bookId: string): Promise<boolean> {
+    const rows = await tx.execute<{ id: string }>(sql`
+      UPDATE ${books}
+         SET available_copies = available_copies - 1
+       WHERE ${books.id} = ${bookId}::uuid
+         AND ${books.availableCopies} > 0
+      RETURNING ${books.id} AS id`);
+    return rows.length > 0;
+  }
+
+  /** Increments available_copies atomically. Returns false if it would exceed total_copies. */
+  async tryIncrementAvailable(tx: DbTransaction, bookId: string): Promise<boolean> {
+    const rows = await tx.execute<{ id: string }>(sql`
+      UPDATE ${books}
+         SET available_copies = available_copies + 1
+       WHERE ${books.id} = ${bookId}::uuid
+         AND ${books.availableCopies} + 1 <= ${books.totalCopies}
+      RETURNING ${books.id} AS id`);
+    return rows.length > 0;
+  }
+
+  async bookExists(tx: DbTransaction, bookId: string): Promise<boolean> {
+    const found = await tx.query.books.findFirst({ where: eq(books.id, bookId), columns: { id: true } });
+    return !!found;
+  }
+
+  async createInTx(
+    tx: DbTransaction,
+    data: { bookId: string; userId: string; status: ReservationStatus },
+  ): Promise<ReservationEntity> {
+    const [row] = await tx.insert(reservations).values(data).returning();
+    return row!;
+  }
+
+  async updateInTx(
+    tx: DbTransaction,
+    id: string,
+    data: Partial<{
+      status: ReservationStatus;
+      checkedOutAt: Date;
+      returnedAt: Date;
+      cancelledAt: Date;
+    }>,
+  ): Promise<ReservationEntity> {
+    const [row] = await tx.update(reservations).set(data).where(eq(reservations.id, id)).returning();
+    return row!;
+  }
+
+  async findByIdInTx(tx: DbTransaction, id: string): Promise<ReservationEntity | undefined> {
+    return tx.query.reservations.findFirst({ where: eq(reservations.id, id) });
+  }
+
+  withTransaction<T>(cb: (tx: DbTransaction) => Promise<T>): Promise<T> {
+    return this.db.transaction(cb);
+  }
+}
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/reservations
+git commit -m "feat(reservations): repository with atomic UPDATE primitives and tx helpers"
+```
+
+---
+
+## Task 16: Reservations service with unit tests
+
+**Files:**
+- Create: `src/reservations/reservations.service.ts`, `src/reservations/reservations.service.spec.ts`
+
+- [ ] **Step 1: Write failing tests `reservations.service.spec.ts`**
 
 ```ts
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ReservationsRepository } from './reservations.repository';
 import { ReservationsService } from './reservations.service';
 
-function makePrisma() {
-  const queryRaw = jest.fn();
-  const reservation = {
-    create: jest.fn(),
-    findUnique: jest.fn(),
-    findMany: jest.fn(),
-    count: jest.fn(),
-    update: jest.fn(),
-  };
-  const book = { findUnique: jest.fn() };
-  const tx = { reservation, book, $queryRaw: queryRaw };
-  const $transaction = jest.fn(async (cb: (t: typeof tx) => Promise<unknown>) => cb(tx));
-  return { $transaction, $queryRaw: queryRaw, reservation, book, tx };
+function makeRepo(): jest.Mocked<ReservationsRepository> {
+  const repo = {
+    findById: jest.fn(),
+    findPaged: jest.fn(),
+    tryDecrementAvailable: jest.fn(),
+    tryIncrementAvailable: jest.fn(),
+    bookExists: jest.fn(),
+    createInTx: jest.fn(),
+    updateInTx: jest.fn(),
+    findByIdInTx: jest.fn(),
+    withTransaction: jest.fn(),
+  } as unknown as jest.Mocked<ReservationsRepository>;
+  // by default, withTransaction just calls the callback with a sentinel tx
+  repo.withTransaction.mockImplementation((cb: any) => cb({} as any));
+  return repo;
 }
 
 describe('ReservationsService', () => {
-  let prisma: ReturnType<typeof makePrisma>;
+  let repo: jest.Mocked<ReservationsRepository>;
   let svc: ReservationsService;
 
   beforeEach(() => {
-    prisma = makePrisma();
-    svc = new ReservationsService(prisma as any);
+    repo = makeRepo();
+    svc = new ReservationsService(repo);
   });
 
-  describe('create()', () => {
-    it('throws 404 when book does not exist', async () => {
-      prisma.tx.book.findUnique.mockResolvedValue(null);
+  describe('create', () => {
+    it('404 when book does not exist', async () => {
+      repo.bookExists.mockResolvedValue(false);
       await expect(svc.create('u1', { bookId: 'b1' })).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('throws 409 when atomic UPDATE returns no rows', async () => {
-      prisma.tx.book.findUnique.mockResolvedValue({ id: 'b1' });
-      prisma.tx.$queryRaw.mockResolvedValue([]); // no copies
+    it('409 when atomic decrement returns no rows', async () => {
+      repo.bookExists.mockResolvedValue(true);
+      repo.tryDecrementAvailable.mockResolvedValue(false);
       await expect(svc.create('u1', { bookId: 'b1' })).rejects.toBeInstanceOf(ConflictException);
-      expect(prisma.tx.reservation.create).not.toHaveBeenCalled();
+      expect(repo.createInTx).not.toHaveBeenCalled();
     });
 
-    it('creates ACTIVE reservation when atomic UPDATE returns a row', async () => {
-      prisma.tx.book.findUnique.mockResolvedValue({ id: 'b1' });
-      prisma.tx.$queryRaw.mockResolvedValue([{ id: 'b1' }]);
-      prisma.tx.reservation.create.mockResolvedValue({
+    it('creates ACTIVE reservation when atomic decrement succeeds', async () => {
+      repo.bookExists.mockResolvedValue(true);
+      repo.tryDecrementAvailable.mockResolvedValue(true);
+      repo.createInTx.mockResolvedValue({
         id: 'r1', bookId: 'b1', userId: 'u1', status: 'ACTIVE',
         reservedAt: new Date(), checkedOutAt: null, returnedAt: null, cancelledAt: null,
       });
@@ -1603,173 +1975,170 @@ describe('ReservationsService', () => {
     });
   });
 
-  describe('checkOut()', () => {
+  describe('checkOut', () => {
+    it('404 on missing reservation', async () => {
+      repo.findByIdInTx.mockResolvedValue(undefined);
+      await expect(svc.checkOut('u1', 'r1')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
     it('forbids non-owners', async () => {
-      prisma.reservation.findUnique.mockResolvedValue({ id: 'r1', userId: 'someone', status: 'ACTIVE' });
+      repo.findByIdInTx.mockResolvedValue({
+        id: 'r1', bookId: 'b1', userId: 'someone', status: 'ACTIVE',
+        reservedAt: new Date(), checkedOutAt: null, returnedAt: null, cancelledAt: null,
+      });
       await expect(svc.checkOut('u1', 'r1')).rejects.toBeInstanceOf(ForbiddenException);
     });
 
     it('rejects illegal transition', async () => {
-      prisma.tx.reservation.findUnique.mockResolvedValue({ id: 'r1', userId: 'u1', status: 'RETURNED' });
-      await expect(svc.checkOut('u1', 'r1')).rejects.toBeInstanceOf(ConflictException);
-    });
-  });
-
-  describe('return()', () => {
-    it('increments availableCopies via atomic UPDATE then marks reservation RETURNED', async () => {
-      prisma.tx.reservation.findUnique.mockResolvedValue({ id: 'r1', userId: 'u1', bookId: 'b1', status: 'CHECKED_OUT' });
-      prisma.tx.$queryRaw.mockResolvedValue([{ id: 'b1' }]);
-      prisma.tx.reservation.update.mockResolvedValue({
+      repo.findByIdInTx.mockResolvedValue({
         id: 'r1', bookId: 'b1', userId: 'u1', status: 'RETURNED',
         reservedAt: new Date(), checkedOutAt: new Date(), returnedAt: new Date(), cancelledAt: null,
       });
+      await expect(svc.checkOut('u1', 'r1')).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('marks CHECKED_OUT with timestamp', async () => {
+      repo.findByIdInTx.mockResolvedValue({
+        id: 'r1', bookId: 'b1', userId: 'u1', status: 'ACTIVE',
+        reservedAt: new Date(), checkedOutAt: null, returnedAt: null, cancelledAt: null,
+      });
+      repo.updateInTx.mockImplementation(async (_tx, _id, data) => ({
+        id: 'r1', bookId: 'b1', userId: 'u1',
+        status: data.status!, reservedAt: new Date(),
+        checkedOutAt: data.checkedOutAt ?? null,
+        returnedAt: null, cancelledAt: null,
+      }));
+      const out = await svc.checkOut('u1', 'r1');
+      expect(out.status).toBe('CHECKED_OUT');
+      expect(out.checkedOutAt).not.toBeNull();
+    });
+  });
+
+  describe('return_', () => {
+    it('increments availableCopies and marks RETURNED', async () => {
+      repo.findByIdInTx.mockResolvedValue({
+        id: 'r1', bookId: 'b1', userId: 'u1', status: 'CHECKED_OUT',
+        reservedAt: new Date(), checkedOutAt: new Date(), returnedAt: null, cancelledAt: null,
+      });
+      repo.tryIncrementAvailable.mockResolvedValue(true);
+      repo.updateInTx.mockImplementation(async (_tx, _id, data) => ({
+        id: 'r1', bookId: 'b1', userId: 'u1',
+        status: data.status!, reservedAt: new Date(),
+        checkedOutAt: new Date(),
+        returnedAt: data.returnedAt ?? null,
+        cancelledAt: null,
+      }));
       const out = await svc.return_('u1', 'r1');
       expect(out.status).toBe('RETURNED');
-      expect(prisma.tx.$queryRaw).toHaveBeenCalled();
+      expect(repo.tryIncrementAvailable).toHaveBeenCalled();
     });
   });
 });
 ```
 
-> Note: `findUnique` is consulted **inside** the transaction; the test uses `prisma.tx.reservation.findUnique` consistently. Where the failing-path test uses `prisma.reservation.findUnique` (the non-tx one), that is intentional — `checkOut()` performs the ownership check before opening the transaction.
-
-- [ ] **Step 3: Run, see fail**
+- [ ] **Step 2: Run, see fail**
 
 Run: `npm run test:unit -- reservations.service`
 Expected: FAIL.
 
-- [ ] **Step 4: Implement `reservations.service.ts`**
+- [ ] **Step 3: Implement `reservations.service.ts`**
 
 ```ts
 import {
   ConflictException, ForbiddenException, Injectable, NotFoundException,
 } from '@nestjs/common';
-import { Prisma, ReservationStatus } from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
 import { PagedResult } from '../common/dto/pagination.dto';
-import { reservationTransition } from './transition';
 import { CreateReservationDto } from './dto/create-reservation.dto';
-import { ReservationEntity } from './dto/reservation.entity';
 import { ListReservationsQueryDto } from './dto/list-reservations.query';
+import { ReservationEntity } from './dto/reservation.entity';
+import { ReservationsRepository } from './reservations.repository';
+import { reservationTransition, ReservationAction } from './transition';
+import type { DbTransaction } from '../../db/types';
 
 @Injectable()
 export class ReservationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly repo: ReservationsRepository) {}
 
   async create(userId: string, dto: CreateReservationDto): Promise<ReservationEntity> {
-    return this.prisma.$transaction(async (tx) => {
-      const book = await tx.book.findUnique({ where: { id: dto.bookId } });
-      if (!book) throw new NotFoundException('Book not found');
-
-      const rows = await tx.$queryRaw<{ id: string }[]>`
-        UPDATE books
-           SET available_copies = available_copies - 1
-         WHERE id = ${dto.bookId}::uuid
-           AND available_copies > 0
-        RETURNING id`;
-      if (rows.length === 0) throw new ConflictException('No copies available');
-
-      return tx.reservation.create({
-        data: { bookId: dto.bookId, userId, status: 'ACTIVE' },
-      });
+    return this.repo.withTransaction(async (tx: DbTransaction) => {
+      if (!(await this.repo.bookExists(tx, dto.bookId))) {
+        throw new NotFoundException('Book not found');
+      }
+      const ok = await this.repo.tryDecrementAvailable(tx, dto.bookId);
+      if (!ok) throw new ConflictException('No copies available');
+      return this.repo.createInTx(tx, { bookId: dto.bookId, userId, status: 'ACTIVE' });
     });
   }
 
   async findOne(id: string): Promise<ReservationEntity> {
-    const r = await this.prisma.reservation.findUnique({ where: { id } });
+    const r = await this.repo.findById(id);
     if (!r) throw new NotFoundException('Reservation not found');
     return r;
   }
 
   async findAll(q: ListReservationsQueryDto): Promise<PagedResult<ReservationEntity>> {
-    const where: Prisma.ReservationWhereInput = {
-      ...(q.userId ? { userId: q.userId } : {}),
-      ...(q.bookId ? { bookId: q.bookId } : {}),
-      ...(q.status ? { status: q.status } : {}),
-    };
-    const [items, total] = await Promise.all([
-      this.prisma.reservation.findMany({
-        where,
-        skip: (q.page - 1) * q.pageSize,
-        take: q.pageSize,
-        orderBy: { reservedAt: 'desc' },
-      }),
-      this.prisma.reservation.count({ where }),
-    ]);
+    const { items, total } = await this.repo.findPaged(q.page, q.pageSize, {
+      userId: q.userId,
+      bookId: q.bookId,
+      status: q.status,
+    });
     return { items, total, page: q.page, pageSize: q.pageSize };
   }
 
   async checkOut(userId: string, id: string): Promise<ReservationEntity> {
-    const owner = await this.prisma.reservation.findUnique({ where: { id } });
-    if (!owner) throw new NotFoundException('Reservation not found');
-    if (owner.userId !== userId) throw new ForbiddenException('Not the reservation owner');
-
-    return this.prisma.$transaction(async (tx) => {
-      const r = await tx.reservation.findUnique({ where: { id } });
+    return this.repo.withTransaction(async (tx: DbTransaction) => {
+      const r = await this.repo.findByIdInTx(tx, id);
       if (!r) throw new NotFoundException('Reservation not found');
+      if (r.userId !== userId) throw new ForbiddenException('Not the reservation owner');
       const next = reservationTransition(r.status, 'check_out');
-      return tx.reservation.update({
-        where: { id },
-        data: { status: next, checkedOutAt: new Date() },
-      });
+      return this.repo.updateInTx(tx, id, { status: next, checkedOutAt: new Date() });
     });
   }
 
   async return_(userId: string, id: string): Promise<ReservationEntity> {
-    return this.transitionWithCopyChange(userId, id, 'return', +1, 'returnedAt');
+    return this.transitionWithCopyChange(userId, id, 'return', 'returnedAt');
   }
 
   async cancel(userId: string, id: string): Promise<ReservationEntity> {
-    return this.transitionWithCopyChange(userId, id, 'cancel', +1, 'cancelledAt');
+    return this.transitionWithCopyChange(userId, id, 'cancel', 'cancelledAt');
   }
 
   private async transitionWithCopyChange(
     userId: string,
     id: string,
-    action: 'return' | 'cancel',
-    delta: number,
+    action: ReservationAction,
     timestampField: 'returnedAt' | 'cancelledAt',
   ): Promise<ReservationEntity> {
-    return this.prisma.$transaction(async (tx) => {
-      const r = await tx.reservation.findUnique({ where: { id } });
+    return this.repo.withTransaction(async (tx: DbTransaction) => {
+      const r = await this.repo.findByIdInTx(tx, id);
       if (!r) throw new NotFoundException('Reservation not found');
       if (r.userId !== userId) throw new ForbiddenException('Not the reservation owner');
-      const next: ReservationStatus = reservationTransition(r.status, action);
+      const next = reservationTransition(r.status, action);
 
-      const rows = await tx.$queryRaw<{ id: string }[]>`
-        UPDATE books
-           SET available_copies = available_copies + ${delta}
-         WHERE id = ${r.bookId}::uuid
-           AND available_copies + ${delta} <= total_copies
-        RETURNING id`;
-      if (rows.length === 0) {
-        throw new ConflictException('Copy accounting invariant violated');
-      }
+      const ok = await this.repo.tryIncrementAvailable(tx, r.bookId);
+      if (!ok) throw new ConflictException('Copy accounting invariant violated');
 
-      return tx.reservation.update({
-        where: { id },
-        data: { status: next, [timestampField]: new Date() },
-      });
+      return this.repo.updateInTx(tx, id, { status: next, [timestampField]: new Date() });
     });
   }
 }
 ```
 
-- [ ] **Step 5: Re-run tests**
+- [ ] **Step 4: Re-run tests**
 
 Run: `npm run test:unit -- reservations.service`
 Expected: passing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/reservations
-git commit -m "feat(reservations): ReservationsService with atomic UPDATE concurrency"
+git add src/reservations/reservations.service.ts src/reservations/reservations.service.spec.ts
+git commit -m "feat(reservations): service with atomic UPDATE concurrency and unit tests"
 ```
 
 ---
 
-## Task 14: Reservations controller and module
+## Task 17: Reservations controller and module
 
 **Files:**
 - Create: `src/reservations/reservations.controller.ts`, `src/reservations/reservations.module.ts`
@@ -1801,8 +2170,7 @@ export class ReservationsController {
 
   @Get() findAll(@Query() q: ListReservationsQueryDto) { return this.svc.findAll(q); }
 
-  @Get(':id')
-  findOne(@Param('id', ParseUUIDPipe) id: string) { return this.svc.findOne(id); }
+  @Get(':id') findOne(@Param('id', ParseUUIDPipe) id: string) { return this.svc.findOne(id); }
 
   @Post(':id/check-out') @UseGuards(UserExistsGuard)
   checkOut(@CurrentUserId() userId: string, @Param('id', ParseUUIDPipe) id: string) {
@@ -1826,21 +2194,22 @@ export class ReservationsController {
 ```ts
 import { Module } from '@nestjs/common';
 import { ReservationsController } from './reservations.controller';
+import { ReservationsRepository } from './reservations.repository';
 import { ReservationsService } from './reservations.service';
 
 @Module({
   controllers: [ReservationsController],
-  providers: [ReservationsService],
-  exports: [ReservationsService],
+  providers: [ReservationsService, ReservationsRepository],
+  exports: [ReservationsService, ReservationsRepository],
 })
 export class ReservationsModule {}
 ```
 
 - [ ] **Step 3: Register in `AppModule`**
 
-Add `ReservationsModule` to `imports`.
+Add `ReservationsModule` to imports.
 
-- [ ] **Step 4: Build to verify**
+- [ ] **Step 4: Build**
 
 Run: `npm run build`
 Expected: success.
@@ -1849,17 +2218,15 @@ Expected: success.
 
 ```bash
 git add src/reservations src/app.module.ts
-git commit -m "feat(reservations): add controller and module"
+git commit -m "feat(reservations): controller and module"
 ```
 
 ---
 
-## Task 15: Search ranking (pure function with unit tests)
+## Task 18: Pure ranking helper + tests
 
 **Files:**
 - Create: `src/search/ranking.ts`, `src/search/ranking.spec.ts`
-
-This pure function is what unit-tests the *ordering* logic independently of Postgres. The integration tests in Task 19 verify the actual Postgres-side ranking.
 
 - [ ] **Step 1: Write failing tests `ranking.spec.ts`**
 
@@ -1871,12 +2238,12 @@ const row = (id: string, title: string, score: number): RankedRow => ({ id, titl
 describe('sortRanked', () => {
   it('orders by score desc', () => {
     const out = sortRanked([row('a', 'X', 0.1), row('b', 'Y', 0.9)]);
-    expect(out.map(r => r.id)).toEqual(['b', 'a']);
+    expect(out.map((r) => r.id)).toEqual(['b', 'a']);
   });
 
   it('breaks score ties by title asc', () => {
     const out = sortRanked([row('a', 'Beta', 0.5), row('b', 'Alpha', 0.5)]);
-    expect(out.map(r => r.id)).toEqual(['b', 'a']);
+    expect(out.map((r) => r.id)).toEqual(['b', 'a']);
   });
 
   it('breaks score+title ties by id asc', () => {
@@ -1884,7 +2251,7 @@ describe('sortRanked', () => {
       row('22222222-2222-2222-2222-222222222222', 'T', 0.5),
       row('11111111-1111-1111-1111-111111111111', 'T', 0.5),
     ]);
-    expect(out.map(r => r.id[0])).toEqual(['1', '2']);
+    expect(out.map((r) => r.id[0])).toEqual(['1', '2']);
   });
 });
 ```
@@ -1912,7 +2279,7 @@ export function sortRanked<T extends RankedRow>(rows: T[]): T[] {
 }
 ```
 
-- [ ] **Step 4: Re-run tests**
+- [ ] **Step 4: Re-run**
 
 Run: `npm run test:unit -- ranking`
 Expected: 3 passing.
@@ -1926,10 +2293,10 @@ git commit -m "feat(search): pure sortRanked helper with deterministic tie-break
 
 ---
 
-## Task 16: SearchService, controller, and module
+## Task 19: Search repository, service, controller, module
 
 **Files:**
-- Create: `src/search/search.service.ts`, `src/search/search.controller.ts`, `src/search/search.module.ts`, `src/search/dto/{search-books.query,book-with-score.entity}.ts`
+- Create: `src/search/search.repository.ts`, `src/search/search.service.ts`, `src/search/search.controller.ts`, `src/search/search.module.ts`, `src/search/dto/{search-books.query,book-with-score.entity}.ts`
 - Modify: `src/app.module.ts`
 
 - [ ] **Step 1: Create DTOs**
@@ -1942,13 +2309,11 @@ import { PaginationQueryDto } from '../../common/dto/pagination.dto';
 
 export class SearchBooksQueryDto extends PaginationQueryDto {
   @ApiProperty({ description: 'Free-text search query' })
-  @IsString()
-  @IsNotEmpty()
+  @IsString() @IsNotEmpty()
   q!: string;
 
   @ApiPropertyOptional({ format: 'uuid' })
-  @IsOptional()
-  @IsUUID()
+  @IsOptional() @IsUUID()
   authorId?: string;
 }
 ```
@@ -1963,16 +2328,16 @@ export class BookWithScoreEntity extends BookEntity {
 }
 ```
 
-- [ ] **Step 2: Implement `search.service.ts`**
+- [ ] **Step 2: Create `search.repository.ts`**
 
 ```ts
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { PagedResult } from '../common/dto/pagination.dto';
-import { SearchBooksQueryDto } from './dto/search-books.query';
+import { Inject, Injectable } from '@nestjs/common';
+import { sql } from 'drizzle-orm';
+import { DRIZZLE } from '../db/drizzle.token';
+import type { Database } from '../../db/types';
 import { BookWithScoreEntity } from './dto/book-with-score.entity';
 
-type Row = {
+interface Row {
   id: string;
   title: string;
   author_id: string;
@@ -1981,21 +2346,25 @@ type Row = {
   available_copies: number;
   created_at: Date;
   updated_at: Date;
-  score: number;
   author_name: string;
-};
+  score: number;
+}
 
 @Injectable()
-export class SearchService {
-  constructor(private readonly prisma: PrismaService) {}
+export class SearchRepository {
+  constructor(@Inject(DRIZZLE) private readonly db: Database) {}
 
-  async searchBooks(q: SearchBooksQueryDto): Promise<PagedResult<BookWithScoreEntity>> {
-    const offset = (q.page - 1) * q.pageSize;
+  async searchBooks(params: {
+    q: string;
+    authorId: string | null;
+    page: number;
+    pageSize: number;
+  }): Promise<{ items: BookWithScoreEntity[]; total: number }> {
+    const { q, authorId, page, pageSize } = params;
+    const offset = (page - 1) * pageSize;
 
-    const filterAuthor = q.authorId ?? null;
-
-    const rows = await this.prisma.$queryRaw<Row[]>`
-      WITH query AS (SELECT plainto_tsquery('simple', ${q.q}) AS qry)
+    const rows = await this.db.execute<Row>(sql`
+      WITH query AS (SELECT plainto_tsquery('simple', ${q}) AS qry)
       SELECT
         b.id,
         b.title,
@@ -2007,53 +2376,76 @@ export class SearchService {
         b.updated_at,
         a.name AS author_name,
         (ts_rank_cd(b.search_vector, query.qry)
-          + 0.5 * ts_rank_cd(to_tsvector('simple', a.name), query.qry)) AS score
+          + 0.5 * ts_rank_cd(to_tsvector('simple', a.name), query.qry))::float8 AS score
       FROM books b
       JOIN authors a ON a.id = b.author_id
       CROSS JOIN query
       WHERE (b.search_vector @@ query.qry
              OR to_tsvector('simple', a.name) @@ query.qry)
-        AND (${filterAuthor}::uuid IS NULL OR b.author_id = ${filterAuthor}::uuid)
+        AND (${authorId}::uuid IS NULL OR b.author_id = ${authorId}::uuid)
       ORDER BY score DESC, b.title ASC, b.id ASC
-      LIMIT ${q.pageSize} OFFSET ${offset}`;
+      LIMIT ${pageSize} OFFSET ${offset}`);
 
-    const totalRows = await this.prisma.$queryRaw<{ count: bigint }[]>`
-      WITH query AS (SELECT plainto_tsquery('simple', ${q.q}) AS qry)
-      SELECT count(*)::bigint AS count
+    const totalRows = await this.db.execute<{ count: string }>(sql`
+      WITH query AS (SELECT plainto_tsquery('simple', ${q}) AS qry)
+      SELECT count(*)::text AS count
       FROM books b
       JOIN authors a ON a.id = b.author_id
       CROSS JOIN query
       WHERE (b.search_vector @@ query.qry
              OR to_tsvector('simple', a.name) @@ query.qry)
-        AND (${filterAuthor}::uuid IS NULL OR b.author_id = ${filterAuthor}::uuid)`;
+        AND (${authorId}::uuid IS NULL OR b.author_id = ${authorId}::uuid)`);
 
-    return {
-      items: rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        authorId: r.author_id,
-        isbn: r.isbn,
-        totalCopies: r.total_copies,
-        availableCopies: r.available_copies,
-        createdAt: r.created_at,
-        updatedAt: r.updated_at,
-        score: Number(r.score),
-      })),
-      total: Number(totalRows[0]?.count ?? 0n),
-      page: q.page,
-      pageSize: q.pageSize,
-    };
+    const items = rows.map((r): BookWithScoreEntity => ({
+      id: r.id,
+      title: r.title,
+      authorId: r.author_id,
+      isbn: r.isbn,
+      totalCopies: r.total_copies,
+      availableCopies: r.available_copies,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      score: Number(r.score),
+    }));
+    const total = Number(totalRows[0]?.count ?? '0');
+    return { items, total };
   }
 }
 ```
 
-- [ ] **Step 3: Implement `search.controller.ts`**
+- [ ] **Step 3: Create `search.service.ts`**
 
+```ts
+import { Injectable } from '@nestjs/common';
+import { PagedResult } from '../common/dto/pagination.dto';
+import { BookWithScoreEntity } from './dto/book-with-score.entity';
+import { SearchBooksQueryDto } from './dto/search-books.query';
+import { SearchRepository } from './search.repository';
+
+@Injectable()
+export class SearchService {
+  constructor(private readonly repo: SearchRepository) {}
+
+  async searchBooks(q: SearchBooksQueryDto): Promise<PagedResult<BookWithScoreEntity>> {
+    const { items, total } = await this.repo.searchBooks({
+      q: q.q,
+      authorId: q.authorId ?? null,
+      page: q.page,
+      pageSize: q.pageSize,
+    });
+    return { items, total, page: q.page, pageSize: q.pageSize };
+  }
+}
+```
+
+- [ ] **Step 4: Create `search.controller.ts` and `search.module.ts`**
+
+`search.controller.ts`:
 ```ts
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { SearchService } from './search.service';
 import { SearchBooksQueryDto } from './dto/search-books.query';
+import { SearchService } from './search.service';
 
 @ApiTags('search')
 @Controller('search')
@@ -2061,31 +2453,29 @@ export class SearchController {
   constructor(private readonly svc: SearchService) {}
 
   @Get('books')
-  searchBooks(@Query() q: SearchBooksQueryDto) {
-    return this.svc.searchBooks(q);
-  }
+  searchBooks(@Query() q: SearchBooksQueryDto) { return this.svc.searchBooks(q); }
 }
 ```
 
-- [ ] **Step 4: Implement `search.module.ts`**
-
+`search.module.ts`:
 ```ts
 import { Module } from '@nestjs/common';
 import { SearchController } from './search.controller';
+import { SearchRepository } from './search.repository';
 import { SearchService } from './search.service';
 
 @Module({
   controllers: [SearchController],
-  providers: [SearchService],
+  providers: [SearchService, SearchRepository],
 })
 export class SearchModule {}
 ```
 
 - [ ] **Step 5: Register in `AppModule`**
 
-Add `SearchModule` to `imports`.
+Add `SearchModule` to imports.
 
-- [ ] **Step 6: Build to verify**
+- [ ] **Step 6: Build**
 
 Run: `npm run build`
 Expected: success.
@@ -2094,60 +2484,64 @@ Expected: success.
 
 ```bash
 git add src/search src/app.module.ts
-git commit -m "feat(search): tsvector-based full-text search with ts_rank_cd scoring"
+git commit -m "feat(search): tsvector-based search with ts_rank_cd scoring"
 ```
 
 ---
 
-## Task 17: Seed script
+## Task 20: Seed script
 
 **Files:**
-- Create: `prisma/seed.ts`
+- Create: `db/seed.ts`
 
-- [ ] **Step 1: Create `prisma/seed.ts`**
+- [ ] **Step 1: Create `db/seed.ts`**
 
 ```ts
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import 'dotenv/config';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
+import * as schema from './schema';
 
 async function main(): Promise<void> {
-  // Users
-  await prisma.user.createMany({
-    data: [
+  const client = postgres(process.env.DATABASE_URL!);
+  const db = drizzle(client, { schema });
+
+  await db
+    .insert(schema.users)
+    .values([
       { id: '11111111-1111-1111-1111-111111111111', email: 'alice@example.com' },
       { id: '22222222-2222-2222-2222-222222222222', email: 'bob@example.com' },
       { id: '33333333-3333-3333-3333-333333333333', email: 'carol@example.com' },
-    ],
-    skipDuplicates: true,
-  });
+    ])
+    .onConflictDoNothing();
 
-  // Authors
-  const fowler = await prisma.author.upsert({
-    where: { id: 'aaaaaaaa-0000-0000-0000-000000000001' },
-    update: {},
-    create: { id: 'aaaaaaaa-0000-0000-0000-000000000001', name: 'Martin Fowler' },
-  });
-  const martin = await prisma.author.upsert({
-    where: { id: 'aaaaaaaa-0000-0000-0000-000000000002' },
-    update: {},
-    create: { id: 'aaaaaaaa-0000-0000-0000-000000000002', name: 'Robert C. Martin' },
-  });
+  const [fowler] = await db
+    .insert(schema.authors)
+    .values({ id: 'aaaaaaaa-0000-0000-0000-000000000001', name: 'Martin Fowler' })
+    .onConflictDoNothing()
+    .returning();
+  const [martin] = await db
+    .insert(schema.authors)
+    .values({ id: 'aaaaaaaa-0000-0000-0000-000000000002', name: 'Robert C. Martin' })
+    .onConflictDoNothing()
+    .returning();
 
-  // Books
-  await prisma.book.createMany({
-    data: [
-      { title: 'Clean Code',       authorId: martin.id,  isbn: '9780132350884', totalCopies: 2, availableCopies: 2 },
-      { title: 'The Clean Coder',  authorId: martin.id,  isbn: '9780137081073', totalCopies: 1, availableCopies: 1 },
-      { title: 'Refactoring',      authorId: fowler.id,  isbn: '9780134757599', totalCopies: 3, availableCopies: 3 },
-    ],
-    skipDuplicates: true,
-  });
+  await db
+    .insert(schema.books)
+    .values([
+      { title: 'Clean Code',      authorId: martin!.id, isbn: '9780132350884', totalCopies: 2, availableCopies: 2 },
+      { title: 'The Clean Coder', authorId: martin!.id, isbn: '9780137081073', totalCopies: 1, availableCopies: 1 },
+      { title: 'Refactoring',     authorId: fowler!.id, isbn: '9780134757599', totalCopies: 3, availableCopies: 3 },
+    ])
+    .onConflictDoNothing();
+
+  await client.end();
 }
 
-main()
-  .then(() => prisma.$disconnect())
-  .catch(async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
 ```
 
 - [ ] **Step 2: Run the seed**
@@ -2157,20 +2551,20 @@ Expected: no errors.
 
 - [ ] **Step 3: Verify Swagger end-to-end**
 
-Run: `npm run start:dev` (in another shell or background).
-Open `http://localhost:3000/api/docs`. Verify the four tag groups (`authors`, `books`, `search`, `reservations`) are present and routes are documented.
+Run: `npm run start:dev` (in another shell / background).
+Open `http://localhost:3000/api/docs`. Verify the four tag groups (`authors`, `books`, `search`, `reservations`) are documented.
 Stop the dev server.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add prisma/seed.ts
-git commit -m "chore(db): add seed script with users, authors, and a few books"
+git add db/seed.ts
+git commit -m "chore(db): seed script with users, authors, and a few books"
 ```
 
 ---
 
-## Task 18: Integration test scaffolding
+## Task 21: Integration test scaffolding
 
 **Files:**
 - Create: `test/jest-e2e.config.ts`, `test/globalSetup.ts`, `test/helpers/app.ts`, `test/helpers/db.ts`
@@ -2195,14 +2589,19 @@ export default config;
 - [ ] **Step 2: Create `test/globalSetup.ts`**
 
 ```ts
-import { execSync } from 'node:child_process';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
+import postgres from 'postgres';
 
 export default async function globalSetup(): Promise<void> {
-  // Expects DATABASE_URL to point at a dedicated test database.
   process.env.DATABASE_URL =
     process.env.DATABASE_URL ??
-    'postgresql://library:library@localhost:5432/library_test?schema=public';
-  execSync('npx prisma migrate deploy', { stdio: 'inherit', env: process.env });
+    'postgresql://library:library@localhost:5432/library_test';
+
+  const client = postgres(process.env.DATABASE_URL, { max: 1 });
+  const db = drizzle(client);
+  await migrate(db, { migrationsFolder: './db/migrations' });
+  await client.end();
 }
 ```
 
@@ -2212,7 +2611,7 @@ export default async function globalSetup(): Promise<void> {
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { AppModule } from '../../src/app.module';
-import { PrismaExceptionFilter } from '../../src/common/filters/prisma-exception.filter';
+import { DbExceptionFilter } from '../../src/common/filters/db-exception.filter';
 
 export async function createTestingApp(): Promise<INestApplication> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -2220,7 +2619,7 @@ export async function createTestingApp(): Promise<INestApplication> {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
-  app.useGlobalFilters(new PrismaExceptionFilter());
+  app.useGlobalFilters(new DbExceptionFilter());
   await app.init();
   return app;
 }
@@ -2229,44 +2628,59 @@ export async function createTestingApp(): Promise<INestApplication> {
 - [ ] **Step 4: Create `test/helpers/db.ts`**
 
 ```ts
-import { PrismaClient } from '@prisma/client';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres, { Sql } from 'postgres';
+import * as schema from '../../db/schema';
 
-export async function resetDb(prisma: PrismaClient): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE reservations, books, authors, users RESTART IDENTITY CASCADE',
-  );
+export interface TestDb {
+  db: ReturnType<typeof drizzle<typeof schema>>;
+  client: Sql;
 }
 
-export async function seedUsers(prisma: PrismaClient, count: number): Promise<string[]> {
-  const ids: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const u = await prisma.user.create({ data: { email: `u${i}-${Date.now()}@test.io` } });
-    ids.push(u.id);
-  }
-  return ids;
+export function createTestDb(): TestDb {
+  const client = postgres(process.env.DATABASE_URL!);
+  const db = drizzle(client, { schema });
+  return { db, client };
+}
+
+export async function resetDb(client: Sql): Promise<void> {
+  await client`TRUNCATE TABLE reservations, books, authors, users RESTART IDENTITY CASCADE`;
+}
+
+export async function seedUsers(
+  db: ReturnType<typeof drizzle<typeof schema>>,
+  count: number,
+): Promise<string[]> {
+  const inserted = await db
+    .insert(schema.users)
+    .values(
+      Array.from({ length: count }, (_, i) => ({ email: `u${i}-${Date.now()}@test.io` })),
+    )
+    .returning();
+  return inserted.map((u) => u.id);
 }
 ```
 
-- [ ] **Step 5: Create the test database locally**
+- [ ] **Step 5: Create the test database**
 
 Run: `docker compose exec db psql -U library -d postgres -c "CREATE DATABASE library_test"`
 Expected: `CREATE DATABASE`.
 
-- [ ] **Step 6: Apply migrations to the test database**
+- [ ] **Step 6: Apply migrations to the test database (one-time)**
 
-Run: `DATABASE_URL=postgresql://library:library@localhost:5432/library_test?schema=public npx prisma migrate deploy`
+Run: `DATABASE_URL=postgresql://library:library@localhost:5432/library_test npm run db:migrate`
 Expected: success.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add test/jest-e2e.config.ts test/globalSetup.ts test/helpers
-git commit -m "test: add e2e scaffolding (testing module, DB reset helpers)"
+git commit -m "test: e2e scaffolding (Drizzle migrator, test DB helpers)"
 ```
 
 ---
 
-## Task 19: Integration test — reservation lifecycle
+## Task 22: Integration test — reservation lifecycle
 
 **Files:**
 - Create: `test/integration/reservation-lifecycle.e2e-spec.ts`
@@ -2275,49 +2689,52 @@ git commit -m "test: add e2e scaffolding (testing module, DB reset helpers)"
 
 ```ts
 import { INestApplication } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+import { eq } from 'drizzle-orm';
 import request from 'supertest';
+import * as schema from '../../db/schema';
 import { createTestingApp } from '../helpers/app';
-import { resetDb, seedUsers } from '../helpers/db';
+import { createTestDb, resetDb, seedUsers, TestDb } from '../helpers/db';
 
 describe('Reservation lifecycle', () => {
   let app: INestApplication;
-  let prisma: PrismaClient;
+  let tdb: TestDb;
   let userId: string;
   let bookId: string;
 
   beforeAll(async () => {
-    prisma = new PrismaClient();
+    tdb = createTestDb();
     app = await createTestingApp();
   });
 
   beforeEach(async () => {
-    await resetDb(prisma);
-    [userId] = await seedUsers(prisma, 1);
-    const author = await prisma.author.create({ data: { name: 'A' } });
-    const book = await prisma.book.create({
-      data: { title: 'Bk', authorId: author.id, isbn: '9780132350884', totalCopies: 1, availableCopies: 1 },
-    });
-    bookId = book.id;
+    await resetDb(tdb.client);
+    [userId] = await seedUsers(tdb.db, 1);
+    const [author] = await tdb.db.insert(schema.authors).values({ name: 'A' }).returning();
+    const [book] = await tdb.db
+      .insert(schema.books)
+      .values({
+        title: 'Bk', authorId: author!.id, isbn: '9780132350884',
+        totalCopies: 1, availableCopies: 1,
+      })
+      .returning();
+    bookId = book!.id;
   });
 
   afterAll(async () => {
     await app.close();
-    await prisma.$disconnect();
+    await tdb.client.end();
   });
 
   it('reserve -> check out -> return: available_copies toggles 1->0->0->1', async () => {
-    // RESERVE
     const create = await request(app.getHttpServer())
       .post('/reservations')
       .set('X-User-Id', userId)
       .send({ bookId })
       .expect(201);
     expect(create.body.status).toBe('ACTIVE');
-    let book = await prisma.book.findUnique({ where: { id: bookId } });
+    let book = await tdb.db.query.books.findFirst({ where: eq(schema.books.id, bookId) });
     expect(book?.availableCopies).toBe(0);
 
-    // CHECK OUT
     const reservationId = create.body.id;
     const checkout = await request(app.getHttpServer())
       .post(`/reservations/${reservationId}/check-out`)
@@ -2325,17 +2742,16 @@ describe('Reservation lifecycle', () => {
       .expect(200);
     expect(checkout.body.status).toBe('CHECKED_OUT');
     expect(checkout.body.checkedOutAt).not.toBeNull();
-    book = await prisma.book.findUnique({ where: { id: bookId } });
+    book = await tdb.db.query.books.findFirst({ where: eq(schema.books.id, bookId) });
     expect(book?.availableCopies).toBe(0);
 
-    // RETURN
     const returned = await request(app.getHttpServer())
       .post(`/reservations/${reservationId}/return`)
       .set('X-User-Id', userId)
       .expect(200);
     expect(returned.body.status).toBe('RETURNED');
     expect(returned.body.returnedAt).not.toBeNull();
-    book = await prisma.book.findUnique({ where: { id: bookId } });
+    book = await tdb.db.query.books.findFirst({ where: eq(schema.books.id, bookId) });
     expect(book?.availableCopies).toBe(1);
   });
 
@@ -2367,7 +2783,7 @@ git commit -m "test(integration): reservation lifecycle e2e"
 
 ---
 
-## Task 20: Integration test — concurrent reservation attempts
+## Task 23: Integration test — concurrent reservations
 
 **Files:**
 - Create: `test/integration/reservation-concurrent.e2e-spec.ts`
@@ -2376,35 +2792,40 @@ git commit -m "test(integration): reservation lifecycle e2e"
 
 ```ts
 import { INestApplication } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+import { and, eq } from 'drizzle-orm';
 import request from 'supertest';
+import * as schema from '../../db/schema';
 import { createTestingApp } from '../helpers/app';
-import { resetDb, seedUsers } from '../helpers/db';
+import { createTestDb, resetDb, seedUsers, TestDb } from '../helpers/db';
 
 describe('Concurrent reservations on the last copy', () => {
   let app: INestApplication;
-  let prisma: PrismaClient;
+  let tdb: TestDb;
   let users: string[];
   let bookId: string;
 
   beforeAll(async () => {
-    prisma = new PrismaClient();
+    tdb = createTestDb();
     app = await createTestingApp();
   });
 
   beforeEach(async () => {
-    await resetDb(prisma);
-    users = await seedUsers(prisma, 10);
-    const author = await prisma.author.create({ data: { name: 'A' } });
-    const book = await prisma.book.create({
-      data: { title: 'Bk', authorId: author.id, isbn: '9780132350884', totalCopies: 1, availableCopies: 1 },
-    });
-    bookId = book.id;
+    await resetDb(tdb.client);
+    users = await seedUsers(tdb.db, 10);
+    const [author] = await tdb.db.insert(schema.authors).values({ name: 'A' }).returning();
+    const [book] = await tdb.db
+      .insert(schema.books)
+      .values({
+        title: 'Bk', authorId: author!.id, isbn: '9780132350884',
+        totalCopies: 1, availableCopies: 1,
+      })
+      .returning();
+    bookId = book!.id;
   });
 
   afterAll(async () => {
     await app.close();
-    await prisma.$disconnect();
+    await tdb.client.end();
   });
 
   it('exactly one 201 and nine 409 when 10 users race for the last copy', async () => {
@@ -2416,20 +2837,18 @@ describe('Concurrent reservations on the last copy', () => {
           .send({ bookId }),
       ),
     );
-    const statuses = responses.map((r) => r.status).sort();
-    const successes = statuses.filter((s) => s === 201).length;
-    const conflicts = statuses.filter((s) => s === 409).length;
+    const statuses = responses.map((r) => r.status);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(9);
 
-    expect(successes).toBe(1);
-    expect(conflicts).toBe(9);
-
-    const book = await prisma.book.findUnique({ where: { id: bookId } });
+    const book = await tdb.db.query.books.findFirst({ where: eq(schema.books.id, bookId) });
     expect(book?.availableCopies).toBe(0);
 
-    const active = await prisma.reservation.count({
-      where: { bookId, status: 'ACTIVE' },
-    });
-    expect(active).toBe(1);
+    const active = await tdb.db.$count(
+      schema.reservations,
+      and(eq(schema.reservations.bookId, bookId), eq(schema.reservations.status, 'ACTIVE')),
+    );
+    expect(Number(active)).toBe(1);
   });
 });
 ```
@@ -2448,7 +2867,7 @@ git commit -m "test(integration): concurrent reservation race produces 1 success
 
 ---
 
-## Task 21: Search ranking integration tests
+## Task 24: Search ranking integration tests
 
 **Files:**
 - Create: `test/fixtures/search-cases.ts`, `test/integration/search-ranking.e2e-spec.ts`
@@ -2483,83 +2902,83 @@ export const CASE_5_BOOKS: SeedBook[] = [
 ];
 ```
 
-- [ ] **Step 2: Write the spec**
+- [ ] **Step 2: Write the spec `test/integration/search-ranking.e2e-spec.ts`**
 
 ```ts
 import { INestApplication } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
 import request from 'supertest';
-import { createTestingApp } from '../helpers/app';
-import { resetDb } from '../helpers/db';
+import * as schema from '../../db/schema';
 import {
   CASE_1_BOOKS, CASE_3_BOOKS, CASE_4_BOOKS, CASE_5_BOOKS, SeedBook,
 } from '../fixtures/search-cases';
+import { createTestingApp } from '../helpers/app';
+import { createTestDb, resetDb, TestDb } from '../helpers/db';
 
-async function seedBooks(prisma: PrismaClient, books: SeedBook[]): Promise<void> {
-  for (const b of books) {
-    const author = await prisma.author.upsert({
-      where: { id: `00000000-0000-0000-0000-${b.authorName.length.toString().padStart(12, '0')}` },
-      update: { name: b.authorName },
-      create: {
-        id: `00000000-0000-0000-0000-${b.authorName.length.toString().padStart(12, '0')}`,
-        name: b.authorName,
-      },
-    });
-    await prisma.book.create({
-      data: {
-        title: b.title, authorId: author.id, isbn: b.isbn,
-        totalCopies: b.totalCopies, availableCopies: b.totalCopies,
-      },
+async function seedBooks(tdb: TestDb, items: SeedBook[]): Promise<void> {
+  const authorIdByName = new Map<string, string>();
+  for (const b of items) {
+    if (!authorIdByName.has(b.authorName)) {
+      const [a] = await tdb.db
+        .insert(schema.authors)
+        .values({ name: b.authorName })
+        .returning();
+      authorIdByName.set(b.authorName, a!.id);
+    }
+    await tdb.db.insert(schema.books).values({
+      title: b.title,
+      authorId: authorIdByName.get(b.authorName)!,
+      isbn: b.isbn,
+      totalCopies: b.totalCopies,
+      availableCopies: b.totalCopies,
     });
   }
 }
 
 describe('Search ranking acceptance cases', () => {
   let app: INestApplication;
-  let prisma: PrismaClient;
+  let tdb: TestDb;
 
-  beforeAll(async () => { prisma = new PrismaClient(); app = await createTestingApp(); });
-  beforeEach(async () => { await resetDb(prisma); });
-  afterAll(async () => { await app.close(); await prisma.$disconnect(); });
+  beforeAll(async () => { tdb = createTestDb(); app = await createTestingApp(); });
+  beforeEach(async () => { await resetDb(tdb.client); });
+  afterAll(async () => { await app.close(); await tdb.client.end(); });
 
   it('Case 1: "clean code" ranks "Clean Code" first', async () => {
-    await seedBooks(prisma, CASE_1_BOOKS);
+    await seedBooks(tdb, CASE_1_BOOKS);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: 'clean code' }).expect(200);
     expect(res.body.items[0].title).toBe('Clean Code');
   });
 
   it('Case 3: query "fowler" finds "Refactoring" via author', async () => {
-    await seedBooks(prisma, CASE_3_BOOKS);
+    await seedBooks(tdb, CASE_3_BOOKS);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: 'fowler' }).expect(200);
     expect(res.body.items.map((b: { title: string }) => b.title)).toContain('Refactoring');
   });
 
   it('Case 4: hyphenated title tokenises ("domain driven" finds DDD)', async () => {
-    await seedBooks(prisma, CASE_4_BOOKS);
+    await seedBooks(tdb, CASE_4_BOOKS);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: 'domain driven' }).expect(200);
     expect(res.body.items.map((b: { title: string }) => b.title)).toContain('Domain-Driven Design');
   });
 
   it('Case 5: identical-title ties broken deterministically by (title asc, id asc)', async () => {
-    await seedBooks(prisma, CASE_5_BOOKS);
+    await seedBooks(tdb, CASE_5_BOOKS);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: 'patterns' }).expect(200);
-    const ids = res.body.items.map((b: { id: string }) => b.id);
+    const ids: string[] = res.body.items.map((b: { id: string }) => b.id);
     const sorted = [...ids].sort();
     expect(ids).toEqual(sorted);
   });
 
   it('Case 6: SQL-injection-shaped query returns no results, no error', async () => {
-    await seedBooks(prisma, CASE_1_BOOKS);
+    await seedBooks(tdb, CASE_1_BOOKS);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: "'; DROP TABLE books; --" }).expect(200);
     expect(res.body.items).toEqual([]);
-    // tables still exist:
-    const count = await prisma.book.count();
-    expect(count).toBe(CASE_1_BOOKS.length);
+    const count = await tdb.db.$count(schema.books);
+    expect(Number(count)).toBe(CASE_1_BOOKS.length);
   });
 
   it('Case 7: empty q -> 400', async () => {
@@ -2567,25 +2986,22 @@ describe('Search ranking acceptance cases', () => {
   });
 
   it('Case 8: stopword-only query -> empty result, not error', async () => {
-    await seedBooks(prisma, CASE_1_BOOKS);
+    await seedBooks(tdb, CASE_1_BOOKS);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: 'the of' }).expect(200);
     expect(res.body.items).toEqual([]);
   });
 
   it('Case 9: pagination across many matching books', async () => {
-    const author = await prisma.author.create({ data: { name: 'Bulk Author' } });
-    for (let i = 0; i < 25; i++) {
-      await prisma.book.create({
-        data: {
-          title: `Manual ${i.toString().padStart(2, '0')}`,
-          authorId: author.id,
-          isbn: `978${i.toString().padStart(10, '0')}`,
-          totalCopies: 1,
-          availableCopies: 1,
-        },
-      });
-    }
+    const [author] = await tdb.db.insert(schema.authors).values({ name: 'Bulk Author' }).returning();
+    const values = Array.from({ length: 25 }, (_, i) => ({
+      title: `Manual ${i.toString().padStart(2, '0')}`,
+      authorId: author!.id,
+      isbn: `978${i.toString().padStart(10, '0')}`,
+      totalCopies: 1,
+      availableCopies: 1,
+    }));
+    await tdb.db.insert(schema.books).values(values);
     const res = await request(app.getHttpServer())
       .get('/search/books').query({ q: 'manual', page: 2, pageSize: 10 }).expect(200);
     expect(res.body.total).toBe(25);
@@ -2608,7 +3024,7 @@ git commit -m "test(integration): search ranking acceptance cases 1-9"
 
 ---
 
-## Task 22: GitHub Actions CI workflow
+## Task 25: GitHub Actions CI workflow
 
 **Files:**
 - Create: `.github/workflows/ci.yml`
@@ -2635,7 +3051,6 @@ jobs:
           node-version: 24.16.0
           cache: 'npm'
       - run: npm ci
-      - run: npx prisma generate
       - run: npm run lint
       - run: npm run test:unit
 
@@ -2657,7 +3072,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql://library:library@localhost:5432/library_test?schema=public
+      DATABASE_URL: postgresql://library:library@localhost:5432/library_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -2665,60 +3080,43 @@ jobs:
           node-version: 24.16.0
           cache: 'npm'
       - run: npm ci
-      - run: npx prisma generate
-      - run: npx prisma migrate deploy
+      - run: npm run db:migrate
       - run: npm run test:integration
 ```
 
-- [ ] **Step 2: Document the branch protection setup in README**
-
-Append to (or create) `README.md`:
-
-```markdown
-## Required status checks (manual one-time setup)
-
-On GitHub, go to **Settings → Branches → Add rule** for `main`:
-- Require pull request reviews before merging.
-- **Require status checks to pass before merging.**
-- Required checks: `lint-and-unit`, `integration`.
-- Require branches to be up to date.
-
-This blocks merging when the CI workflow fails.
-```
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
-git add .github/workflows/ci.yml README.md
+git add .github/workflows/ci.yml
 git commit -m "ci: GH Actions workflow with lint+unit and integration jobs"
 ```
 
 ---
 
-## Task 23: README and developer experience polish
+## Task 26: README and developer experience polish
 
 **Files:**
-- Create or modify: `README.md`
+- Create: `README.md`
 
-- [ ] **Step 1: Write the README**
+- [ ] **Step 1: Write `README.md`**
 
 ```markdown
 # Library Catalog
 
 A minimal REST service for managing books, authors, and reservations.
-Built with NestJS, Prisma, and Postgres 18.4. Full-text book search via
-Postgres `tsvector` with `ts_rank_cd`-based ranking.
+Built with NestJS, Drizzle ORM, and Postgres 18.4. Full-text book search
+via Postgres `tsvector` with `ts_rank_cd`-based ranking.
 
 ## Quick start
 
 ```bash
-nvm use                    # Node 24.16.0
-docker compose up -d db    # Postgres 18.4
+nvm use                       # Node 24.16.0
+docker compose up -d db       # Postgres 18.4
 cp .env.example .env
 npm install
-npx prisma migrate dev
+npm run db:migrate
 npm run db:seed
-npm run start:dev          # http://localhost:3000/api/docs
+npm run start:dev             # http://localhost:3000/api/docs
 ```
 
 ## Tests
@@ -2729,8 +3127,8 @@ npm run start:dev          # http://localhost:3000/api/docs
 The integration tests expect a `library_test` database:
 ```bash
 docker compose exec db psql -U library -d postgres -c "CREATE DATABASE library_test"
-DATABASE_URL=postgresql://library:library@localhost:5432/library_test?schema=public \
-  npx prisma migrate deploy
+DATABASE_URL=postgresql://library:library@localhost:5432/library_test \
+  npm run db:migrate
 ```
 
 ## Reservation concurrency rule
@@ -2740,41 +3138,54 @@ exist for that book at once. Concurrent attempts on the last copy are
 serialised by a single atomic SQL `UPDATE ... WHERE available_copies > 0
 RETURNING`: exactly one wins (201), the others receive 409 Conflict.
 
-## Required status checks (manual one-time setup)
+## Required status checks (one-time setup)
 
-(as above)
+On GitHub, **Settings → Branches → Add rule** for `main`:
+- Require pull request reviews before merging.
+- Require status checks to pass before merging.
+- Required checks: `lint-and-unit`, `integration`.
+- Require branches to be up to date.
+
+This blocks merging when the CI workflow fails.
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add README.md
-git commit -m "docs: README with quickstart and concurrency rule overview"
+git commit -m "docs: README with quickstart, concurrency rule, branch protection"
 ```
 
 ---
 
 ## Self-review (post-write)
 
-**Spec coverage.** Walking each spec section:
-- §2 AC #1 (search ranking cases) → Tasks 15, 16, 21.
-- §2 AC #2 (concurrency 1 success + N−1 conflicts) → Tasks 12, 13, 20.
-- §2 AC #3 (CI blocks merging) → Task 22.
-- §3 stack → Tasks 1, 2, 3, 22.
-- §4 architecture + 4.1 concurrency strategy → Tasks 4, 13.
-- §5 data model (tables, generated column, enum, indexes, constraints) → Task 3.
-- §5.1 ranking formula → Task 16.
-- §5.2 FSM → Task 12.
-- §6 endpoints (authors, books, search, reservations) → Tasks 9, 11, 14, 16.
-- §7 validation, exception filter, config → Tasks 1, 5.
-- §8 testing strategy → Tasks 5, 6, 8, 10, 12, 13, 15, 18, 19, 20, 21.
-- §8.3 ranking acceptance cases → Task 21 (cases 1, 3, 4, 5, 6, 7, 8, 9 explicitly; case 2 is covered by the same code path and tie-break rules verified in case 5).
-- §8.4 CI workflow → Task 22.
-- §9 project layout → all tasks.
-- §10 dev experience → Tasks 2, 17, 23.
+**Spec coverage** — every section maps to tasks:
+- §2 AC #1 (search ranking cases) → Tasks 18, 19, 24.
+- §2 AC #2 (concurrency: 1 success + N−1 conflicts) → Tasks 14, 15, 16, 23.
+- §2 AC #3 (CI blocks merging) → Task 25.
+- §3 stack & versions → Tasks 1, 2, 3, 25.
+- §3.1 repository pattern → Tasks 8, 11, 15, 19.
+- §4 architecture; §4.1 concurrency strategy → Tasks 4, 15, 16.
+- §5.1 schema (tables, enums, generated col, indexes, checks, relations) → Task 3.
+- §5.2 ranking formula → Task 19.
+- §5.3 FSM → Task 14.
+- §6 endpoints → Tasks 10, 13, 17, 19.
+- §7 validation, error mapping → Tasks 1, 5.
+- §8 testing strategy & cases → Tasks 5, 6, 9, 12, 14, 16, 18, 21, 22, 23, 24.
+- §8.4 CI workflow → Task 25.
+- §9 layout → all tasks.
+- §10 dev experience → Tasks 2, 20, 26.
 
-**Placeholder scan.** No TBD/TODO/"appropriate error handling"/"add validation" left. Every step contains the code or the exact command.
+Search case 2 (rank `code` across "Clean Code"/"The Clean Coder"/"Code Complete") shares its implementation with case 1 and is exercised by the same `/search/books` route covered in Task 24; the deterministic tie-breaking that case 2 leans on is independently verified in case 5.
 
-**Type/name consistency.** `availableCopies`/`totalCopies` (camelCase in TS, snake_case in SQL with explicit `@map`) used consistently. `ReservationStatus` enum used in service, DTO, and tests. `reservationTransition(current, action)` signature matches across `transition.ts`, `transition.spec.ts`, and `reservations.service.ts`. `BookEntity`/`AuthorEntity` referenced consistently.
+**Placeholder scan.** No TBD/TODO/"appropriate error handling"/"add validation" left. Every code step contains complete code; every command step includes the exact command and expected outcome.
+
+**Type / signature consistency.**
+- `Database` and `DbTransaction` defined in `db/types.ts` and used uniformly by repositories.
+- `ReservationStatus` is a string-literal union defined in `src/reservations/transition.ts` and re-used across DTOs, services, repositories, and tests.
+- `reservationTransition(currentStatus, action)` signature stable across `transition.ts`, `transition.spec.ts`, `reservations.service.ts`.
+- Repository method names (`tryDecrementAvailable`, `tryIncrementAvailable`, `createInTx`, `updateInTx`, `findByIdInTx`, `withTransaction`, `bookExists`) match between definition (Task 15) and consumer (Task 16) and the unit-test mocks (Task 16).
+- DTO field names (`availableCopies`, `totalCopies`, `bookId`, `userId`) match the Drizzle camelCase columns and the SQL snake_case via Drizzle's `@map` equivalent (`'available_copies'` etc. in `pgTable` column definitions).
 
 No issues found.
