@@ -1,0 +1,11 @@
+{
+  "owner": "anivar",
+  "slug": "zod-testing",
+  "displayName": "Zod Testing",
+  "latest": {
+    "version": "1.0.1",
+    "publishedAt": 1772684719278,
+    "commit": "https://github.com/openclaw/skills/commit/bbfd874501caf0899ed785dcfe3c2bba1a40c637"
+  },
+  "history": []
+}
