@@ -9,7 +9,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiHeader, ApiTags } from '@nestjs/swagger';
+import { ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { CurrentUserId } from '../common/decorators/current-user-id.decorator';
 import { UserExistsGuard } from '../common/guards/user-exists.guard';
 import { CreateReservationDto } from './dto/create-reservation.dto';
@@ -17,7 +17,7 @@ import { ListReservationsQueryDto } from './dto/list-reservations.query';
 import { ReservationsService } from './reservations.service';
 
 @ApiTags('reservations')
-@ApiHeader({ name: 'X-User-Id', required: true, schema: { format: 'uuid' } })
+@ApiSecurity('X-User-Id')
 @Controller('reservations')
 export class ReservationsController {
   constructor(private readonly svc: ReservationsService) {}

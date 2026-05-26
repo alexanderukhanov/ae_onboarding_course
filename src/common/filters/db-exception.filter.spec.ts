@@ -1,4 +1,5 @@
 import { ArgumentsHost, HttpStatus } from '@nestjs/common';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { PostgresError } from 'postgres';
 import { DbExceptionFilter } from './db-exception.filter';
 
@@ -33,5 +34,12 @@ describe('DbExceptionFilter', () => {
     const { host, res } = mockHost();
     filter.catch(pgError('99999'), host);
     expect(res.status).toHaveBeenCalledWith(HttpStatus.INTERNAL_SERVER_ERROR);
+  });
+
+  it('unwraps DrizzleQueryError and maps the inner Postgres code (regression: live duplicate ISBN was 500)', () => {
+    const { host, res } = mockHost();
+    const wrapped = new DrizzleQueryError('insert ...', [], pgError('23505'));
+    filter.catch(wrapped, host);
+    expect(res.status).toHaveBeenCalledWith(HttpStatus.CONFLICT);
   });
 });

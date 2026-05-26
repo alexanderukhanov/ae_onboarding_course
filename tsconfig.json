@@ -18,6 +18,7 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
 
+    "types": ["node"],
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "sourceMap": true,

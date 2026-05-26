@@ -1,4 +1,5 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpStatus, Logger } from '@nestjs/common';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import type { Response } from 'express';
 import { PostgresError } from 'postgres';
 
@@ -20,13 +21,24 @@ const FALLBACK: Mapping = {
   message: 'Database error',
 };
 
-@Catch(PostgresError)
+/** Walks `.cause` chain looking for the first PostgresError, if any. */
+function unwrapPostgresError(err: unknown): PostgresError | undefined {
+  let cur: unknown = err;
+  while (cur) {
+    if (cur instanceof PostgresError) return cur;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+@Catch(PostgresError, DrizzleQueryError)
 export class DbExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(DbExceptionFilter.name);
 
-  catch(exception: PostgresError, host: ArgumentsHost): void {
+  catch(exception: unknown, host: ArgumentsHost): void {
     const res = host.switchToHttp().getResponse<Response>();
-    const mapping = CODE_MAP[exception.code] ?? FALLBACK;
+    const pg = unwrapPostgresError(exception);
+    const mapping = (pg && CODE_MAP[pg.code]) ?? FALLBACK;
     if (mapping.status >= 500) this.logger.error(exception);
     res
       .status(mapping.status)
