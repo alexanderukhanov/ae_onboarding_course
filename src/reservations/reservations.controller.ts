@@ -35,17 +35,17 @@ export class ReservationsController {
     return this.svc.findOne(id);
   }
 
-  @Post(':id/check-out') @UseGuards(UserExistsGuard)
+  @Post(':id/check-out') @UseGuards(UserExistsGuard) @HttpCode(200)
   checkOut(@CurrentUserId() userId: string, @Param('id', ParseUUIDPipe) id: string) {
     return this.svc.checkOut(userId, id);
   }
 
-  @Post(':id/return') @UseGuards(UserExistsGuard)
+  @Post(':id/return') @UseGuards(UserExistsGuard) @HttpCode(200)
   return_(@CurrentUserId() userId: string, @Param('id', ParseUUIDPipe) id: string) {
     return this.svc.return_(userId, id);
   }
 
-  @Post(':id/cancel') @UseGuards(UserExistsGuard)
+  @Post(':id/cancel') @UseGuards(UserExistsGuard) @HttpCode(200)
   cancel(@CurrentUserId() userId: string, @Param('id', ParseUUIDPipe) id: string) {
     return this.svc.cancel(userId, id);
   }
