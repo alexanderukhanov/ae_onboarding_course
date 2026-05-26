@@ -161,6 +161,8 @@ The migration emitted by `drizzle-kit generate` is committed to `db/migrations/`
 
 Illegal transitions throw `ConflictException` (HTTP 409). Encoded as a pure function `reservationTransition(currentStatus, action) → nextStatus` and unit-tested exhaustively.
 
+`ReservationStatus` is a TypeScript type derived **once** from the `reservationStatus` pgEnum in `db/schema.ts` (`type ReservationStatus = (typeof reservationStatus.enumValues)[number]`) and re-used by every DTO, service, repository, and test. Subsets used by repositories (e.g. non-terminal statuses for the "book has active reservations" check) are exported as named constants from `db/schema.ts` so no magic strings live in feature modules.
+
 ## 6. REST API
 
 All routes return JSON. Errors follow Nest's default `{ statusCode, message, error }` shape. The `X-User-Id` header (UUID, validated with `uuid.validate()`) is required on all reservation write routes; a `UserExistsGuard` returns 401 if absent, malformed, or unknown.
@@ -228,7 +230,8 @@ Pagination defaults: `page=1`, `pageSize=20`, `pageSize` capped at 100.
 - **Services** are unit-tested with mocked repositories (`jest.Mocked<XRepository>`).
 - Pure functions get their own dedicated tests:
   - `reservationTransition(currentStatus, action)`: exhaustive matrix over 4 statuses × 3 actions.
-  - `sortRanked(rows)`: deterministic ordering with score/title/id tie-breakers.
+
+Ranking ordering (`ORDER BY score DESC, title ASC, id ASC`) lives entirely in SQL and is exercised by the integration suite in §8.3 — there is no parallel TS implementation to unit-test.
 - Service-level CRUD coverage includes:
   - Duplicate ISBN → mapped 409.
   - `totalCopies < 0` → 400.
@@ -322,8 +325,6 @@ Checked in at `test/fixtures/search-cases.ts` and consumed by parameterised test
 │   │   ├── search.controller.ts
 │   │   ├── search.service.ts
 │   │   ├── search.repository.ts
-│   │   ├── ranking.ts              # pure
-│   │   ├── ranking.spec.ts
 │   │   └── dto/*.ts
 │   └── reservations/
 │       ├── reservations.module.ts

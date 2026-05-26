@@ -63,8 +63,6 @@
 │   │   ├── search.controller.ts
 │   │   ├── search.service.ts
 │   │   ├── search.repository.ts
-│   │   ├── ranking.ts
-│   │   ├── ranking.spec.ts
 │   │   └── dto/*.ts
 │   └── reservations/
 │       ├── reservations.module.ts
@@ -263,6 +261,7 @@ import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks();
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
@@ -383,6 +382,14 @@ export const reservationStatus = pgEnum('reservation_status', [
   'RETURNED',
   'CANCELLED',
 ]);
+/** Single source of truth for the status union, derived from the pgEnum. */
+export type ReservationStatus = (typeof reservationStatus.enumValues)[number];
+
+/** Statuses for which a copy is considered "in use" (not returned to the shelf). */
+export const NON_TERMINAL_RESERVATION_STATUSES = [
+  'ACTIVE',
+  'CHECKED_OUT',
+] satisfies readonly ReservationStatus[];
 
 export const tsvector = customType<{ data: string }>({
   dataType: () => 'tsvector',
@@ -537,14 +544,14 @@ export const DRIZZLE = Symbol('DRIZZLE');
 - [ ] **Step 2: Create `src/db/db.module.ts`**
 
 ```ts
-import { Global, Logger, Module, OnApplicationShutdown } from '@nestjs/common';
+import { Global, Inject, Logger, Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres, { Sql } from 'postgres';
 import * as schema from '../../db/schema';
 import { DRIZZLE } from './drizzle.token';
 
-const PG_CLIENT = Symbol('PG_CLIENT');
+export const PG_CLIENT = Symbol('PG_CLIENT');
 
 @Global()
 @Module({
@@ -565,13 +572,17 @@ const PG_CLIENT = Symbol('PG_CLIENT');
 })
 export class DbModule implements OnApplicationShutdown {
   private readonly logger = new Logger(DbModule.name);
-  constructor() {}
+
+  constructor(@Inject(PG_CLIENT) private readonly client: Sql) {}
 
   async onApplicationShutdown(): Promise<void> {
     this.logger.log('Closing Postgres client');
+    await this.client.end({ timeout: 5 });
   }
 }
 ```
+
+Note: `app.enableShutdownHooks()` in `src/main.ts` (added in Task 1) is what causes Nest to invoke `onApplicationShutdown` on SIGINT/SIGTERM. Without it, the hook is never called and connections leak.
 
 - [ ] **Step 3: Register `DbModule` in `AppModule`**
 
@@ -954,7 +965,7 @@ export class AuthorEntity {
 ```ts
 import { Inject, Injectable } from '@nestjs/common';
 import { desc, eq } from 'drizzle-orm';
-import { authors } from '../../db/schema';
+import { authors, books } from '../../db/schema';
 import { DRIZZLE } from '../db/drizzle.token';
 import type { Database } from '../../db/types';
 import { AuthorEntity } from './dto/author.entity';
@@ -995,24 +1006,9 @@ export class AuthorsRepository {
   }
 
   async countBooksByAuthor(authorId: string): Promise<number> {
-    const result = await this.db.$count(
-      (await import('../../db/schema')).books,
-      eq((await import('../../db/schema')).books.authorId, authorId),
-    );
-    return Number(result);
+    const c = await this.db.$count(books, eq(books.authorId, authorId));
+    return Number(c);
   }
-}
-```
-
-Note: the dynamic imports for `books` keep the repository's import surface scoped; for simplicity you can also import `books` at the top.
-
-Simpler alternative — replace `countBooksByAuthor` with the top-level form:
-```ts
-import { authors, books } from '../../db/schema';
-// ...
-async countBooksByAuthor(authorId: string): Promise<number> {
-  const c = await this.db.$count(books, eq(books.authorId, authorId));
-  return Number(c);
 }
 ```
 
@@ -1319,7 +1315,7 @@ export class ListBooksQueryDto extends PaginationQueryDto {
 ```ts
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { authors, books, reservations } from '../../db/schema';
+import { authors, books, NON_TERMINAL_RESERVATION_STATUSES, reservations } from '../../db/schema';
 import { DRIZZLE } from '../db/drizzle.token';
 import type { Database } from '../../db/types';
 import { BookEntity } from './dto/book.entity';
@@ -1397,7 +1393,10 @@ export class BooksRepository {
   async countActiveReservations(bookId: string): Promise<number> {
     const c = await this.db.$count(
       reservations,
-      and(eq(reservations.bookId, bookId), inArray(reservations.status, ['ACTIVE', 'CHECKED_OUT'])),
+      and(
+        eq(reservations.bookId, bookId),
+        inArray(reservations.status, NON_TERMINAL_RESERVATION_STATUSES),
+      ),
     );
     return Number(c);
   }
@@ -1672,13 +1671,13 @@ git commit -m "feat(books): controller and module"
 - [ ] **Step 1: Write failing tests `transition.spec.ts`**
 
 ```ts
+import { reservationStatus, type ReservationStatus } from '../../../db/schema';
 import { reservationTransition, ReservationAction } from './transition';
 
-type Status = 'ACTIVE' | 'CHECKED_OUT' | 'RETURNED' | 'CANCELLED';
-const ALL_STATUSES: Status[] = ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'];
+const ALL_STATUSES = reservationStatus.enumValues;
 const ALL_ACTIONS: ReservationAction[] = ['check_out', 'return', 'cancel'];
 
-const legal: Array<[Status, ReservationAction, Status]> = [
+const legal: Array<[ReservationStatus, ReservationAction, ReservationStatus]> = [
   ['ACTIVE',      'check_out', 'CHECKED_OUT'],
   ['ACTIVE',      'cancel',    'CANCELLED'],
   ['CHECKED_OUT', 'return',    'RETURNED'],
@@ -1710,8 +1709,9 @@ Expected: FAIL.
 
 ```ts
 import { ConflictException } from '@nestjs/common';
+import type { ReservationStatus } from '../../db/schema';
 
-export type ReservationStatus = 'ACTIVE' | 'CHECKED_OUT' | 'RETURNED' | 'CANCELLED';
+export type { ReservationStatus };
 export type ReservationAction = 'check_out' | 'return' | 'cancel';
 
 const TABLE: Partial<Record<ReservationStatus, Partial<Record<ReservationAction, ReservationStatus>>>> = {
@@ -1765,13 +1765,13 @@ export class CreateReservationDto {
 `src/reservations/dto/reservation.entity.ts`:
 ```ts
 import { ApiProperty } from '@nestjs/swagger';
-import { ReservationStatus } from '../transition';
+import { reservationStatus, type ReservationStatus } from '../../../db/schema';
 
 export class ReservationEntity {
   @ApiProperty() id!: string;
   @ApiProperty() bookId!: string;
   @ApiProperty() userId!: string;
-  @ApiProperty({ enum: ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'] })
+  @ApiProperty({ enum: reservationStatus.enumValues })
   status!: ReservationStatus;
   @ApiProperty() reservedAt!: Date;
   @ApiProperty({ nullable: true }) checkedOutAt!: Date | null;
@@ -1785,15 +1785,13 @@ export class ReservationEntity {
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional, IsUUID } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
-import { ReservationStatus } from '../transition';
-
-const STATUSES = ['ACTIVE', 'CHECKED_OUT', 'RETURNED', 'CANCELLED'] as const;
+import { reservationStatus, type ReservationStatus } from '../../../db/schema';
 
 export class ListReservationsQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({ format: 'uuid' }) @IsOptional() @IsUUID() userId?: string;
   @ApiPropertyOptional({ format: 'uuid' }) @IsOptional() @IsUUID() bookId?: string;
-  @ApiPropertyOptional({ enum: STATUSES })
-  @IsOptional() @IsEnum(STATUSES)
+  @ApiPropertyOptional({ enum: reservationStatus.enumValues })
+  @IsOptional() @IsEnum(reservationStatus.enumValues)
   status?: ReservationStatus;
 }
 ```
@@ -2223,77 +2221,7 @@ git commit -m "feat(reservations): controller and module"
 
 ---
 
-## Task 18: Pure ranking helper + tests
-
-**Files:**
-- Create: `src/search/ranking.ts`, `src/search/ranking.spec.ts`
-
-- [ ] **Step 1: Write failing tests `ranking.spec.ts`**
-
-```ts
-import { sortRanked, RankedRow } from './ranking';
-
-const row = (id: string, title: string, score: number): RankedRow => ({ id, title, score });
-
-describe('sortRanked', () => {
-  it('orders by score desc', () => {
-    const out = sortRanked([row('a', 'X', 0.1), row('b', 'Y', 0.9)]);
-    expect(out.map((r) => r.id)).toEqual(['b', 'a']);
-  });
-
-  it('breaks score ties by title asc', () => {
-    const out = sortRanked([row('a', 'Beta', 0.5), row('b', 'Alpha', 0.5)]);
-    expect(out.map((r) => r.id)).toEqual(['b', 'a']);
-  });
-
-  it('breaks score+title ties by id asc', () => {
-    const out = sortRanked([
-      row('22222222-2222-2222-2222-222222222222', 'T', 0.5),
-      row('11111111-1111-1111-1111-111111111111', 'T', 0.5),
-    ]);
-    expect(out.map((r) => r.id[0])).toEqual(['1', '2']);
-  });
-});
-```
-
-- [ ] **Step 2: Run, see fail**
-
-Run: `npm run test:unit -- ranking`
-Expected: FAIL.
-
-- [ ] **Step 3: Implement `ranking.ts`**
-
-```ts
-export interface RankedRow {
-  id: string;
-  title: string;
-  score: number;
-}
-
-export function sortRanked<T extends RankedRow>(rows: T[]): T[] {
-  return [...rows].sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    if (a.title !== b.title) return a.title < b.title ? -1 : 1;
-    return a.id < b.id ? -1 : 1;
-  });
-}
-```
-
-- [ ] **Step 4: Re-run**
-
-Run: `npm run test:unit -- ranking`
-Expected: 3 passing.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/search/ranking.ts src/search/ranking.spec.ts
-git commit -m "feat(search): pure sortRanked helper with deterministic tie-breakers"
-```
-
----
-
-## Task 19: Search repository, service, controller, module
+## Task 18: Search repository, service, controller, module
 
 **Files:**
 - Create: `src/search/search.repository.ts`, `src/search/search.service.ts`, `src/search/search.controller.ts`, `src/search/search.module.ts`, `src/search/dto/{search-books.query,book-with-score.entity}.ts`
@@ -2489,7 +2417,7 @@ git commit -m "feat(search): tsvector-based search with ts_rank_cd scoring"
 
 ---
 
-## Task 20: Seed script
+## Task 19: Seed script
 
 **Files:**
 - Create: `db/seed.ts`
@@ -2564,7 +2492,7 @@ git commit -m "chore(db): seed script with users, authors, and a few books"
 
 ---
 
-## Task 21: Integration test scaffolding
+## Task 20: Integration test scaffolding
 
 **Files:**
 - Create: `test/jest-e2e.config.ts`, `test/globalSetup.ts`, `test/helpers/app.ts`, `test/helpers/db.ts`
@@ -2680,7 +2608,7 @@ git commit -m "test: e2e scaffolding (Drizzle migrator, test DB helpers)"
 
 ---
 
-## Task 22: Integration test — reservation lifecycle
+## Task 21: Integration test — reservation lifecycle
 
 **Files:**
 - Create: `test/integration/reservation-lifecycle.e2e-spec.ts`
@@ -2783,7 +2711,7 @@ git commit -m "test(integration): reservation lifecycle e2e"
 
 ---
 
-## Task 23: Integration test — concurrent reservations
+## Task 22: Integration test — concurrent reservations
 
 **Files:**
 - Create: `test/integration/reservation-concurrent.e2e-spec.ts`
@@ -2867,7 +2795,7 @@ git commit -m "test(integration): concurrent reservation race produces 1 success
 
 ---
 
-## Task 24: Search ranking integration tests
+## Task 23: Search ranking integration tests
 
 **Files:**
 - Create: `test/fixtures/search-cases.ts`, `test/integration/search-ranking.e2e-spec.ts`
@@ -3024,7 +2952,7 @@ git commit -m "test(integration): search ranking acceptance cases 1-9"
 
 ---
 
-## Task 25: GitHub Actions CI workflow
+## Task 24: GitHub Actions CI workflow
 
 **Files:**
 - Create: `.github/workflows/ci.yml`
@@ -3045,8 +2973,8 @@ jobs:
     name: Lint + unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 24.16.0
           cache: 'npm'
@@ -3074,8 +3002,8 @@ jobs:
     env:
       DATABASE_URL: postgresql://library:library@localhost:5432/library_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 24.16.0
           cache: 'npm'
@@ -3093,7 +3021,7 @@ git commit -m "ci: GH Actions workflow with lint+unit and integration jobs"
 
 ---
 
-## Task 26: README and developer experience polish
+## Task 25: README and developer experience polish
 
 **Files:**
 - Create: `README.md`
@@ -3161,31 +3089,33 @@ git commit -m "docs: README with quickstart, concurrency rule, branch protection
 ## Self-review (post-write)
 
 **Spec coverage** — every section maps to tasks:
-- §2 AC #1 (search ranking cases) → Tasks 18, 19, 24.
-- §2 AC #2 (concurrency: 1 success + N−1 conflicts) → Tasks 14, 15, 16, 23.
-- §2 AC #3 (CI blocks merging) → Task 25.
-- §3 stack & versions → Tasks 1, 2, 3, 25.
-- §3.1 repository pattern → Tasks 8, 11, 15, 19.
+- §2 AC #1 (search ranking cases) → Tasks 18, 23.
+- §2 AC #2 (concurrency: 1 success + N−1 conflicts) → Tasks 14, 15, 16, 22.
+- §2 AC #3 (CI blocks merging) → Task 24.
+- §3 stack & versions → Tasks 1, 2, 3, 24.
+- §3.1 repository pattern → Tasks 8, 11, 15, 18.
 - §4 architecture; §4.1 concurrency strategy → Tasks 4, 15, 16.
 - §5.1 schema (tables, enums, generated col, indexes, checks, relations) → Task 3.
-- §5.2 ranking formula → Task 19.
-- §5.3 FSM → Task 14.
-- §6 endpoints → Tasks 10, 13, 17, 19.
+- §5.2 ranking formula → Task 18.
+- §5.3 FSM (single source of truth for `ReservationStatus` derived from pgEnum) → Tasks 3, 14.
+- §6 endpoints → Tasks 10, 13, 17, 18.
 - §7 validation, error mapping → Tasks 1, 5.
-- §8 testing strategy & cases → Tasks 5, 6, 9, 12, 14, 16, 18, 21, 22, 23, 24.
-- §8.4 CI workflow → Task 25.
+- §8 testing strategy & cases → Tasks 5, 6, 9, 12, 14, 16, 20, 21, 22, 23.
+- §8.4 CI workflow → Task 24.
 - §9 layout → all tasks.
-- §10 dev experience → Tasks 2, 20, 26.
+- §10 dev experience → Tasks 2, 19, 25.
 
-Search case 2 (rank `code` across "Clean Code"/"The Clean Coder"/"Code Complete") shares its implementation with case 1 and is exercised by the same `/search/books` route covered in Task 24; the deterministic tie-breaking that case 2 leans on is independently verified in case 5.
+Search case 2 (rank `code` across "Clean Code"/"The Clean Coder"/"Code Complete") shares its implementation with case 1 and is exercised by the same `/search/books` route covered in Task 23; the deterministic tie-breaking that case 2 leans on is independently verified in case 5.
 
 **Placeholder scan.** No TBD/TODO/"appropriate error handling"/"add validation" left. Every code step contains complete code; every command step includes the exact command and expected outcome.
 
 **Type / signature consistency.**
 - `Database` and `DbTransaction` defined in `db/types.ts` and used uniformly by repositories.
-- `ReservationStatus` is a string-literal union defined in `src/reservations/transition.ts` and re-used across DTOs, services, repositories, and tests.
+- **`ReservationStatus` is derived once** in `db/schema.ts` from the `reservationStatus` pgEnum (`type ReservationStatus = (typeof reservationStatus.enumValues)[number]`). `transition.ts` re-exports it; DTOs, services, repositories, and tests all consume that single source of truth. No parallel union literals are defined elsewhere.
+- The non-terminal-statuses subset is exported once as `NON_TERMINAL_RESERVATION_STATUSES` from `db/schema.ts` and used by `BooksRepository.countActiveReservations`.
 - `reservationTransition(currentStatus, action)` signature stable across `transition.ts`, `transition.spec.ts`, `reservations.service.ts`.
 - Repository method names (`tryDecrementAvailable`, `tryIncrementAvailable`, `createInTx`, `updateInTx`, `findByIdInTx`, `withTransaction`, `bookExists`) match between definition (Task 15) and consumer (Task 16) and the unit-test mocks (Task 16).
-- DTO field names (`availableCopies`, `totalCopies`, `bookId`, `userId`) match the Drizzle camelCase columns and the SQL snake_case via Drizzle's `@map` equivalent (`'available_copies'` etc. in `pgTable` column definitions).
+- DTO field names (`availableCopies`, `totalCopies`, `bookId`, `userId`) match the Drizzle camelCase columns and the SQL snake_case via the explicit name string in each `pgTable` column definition.
+- `DbModule.onApplicationShutdown` calls `client.end({ timeout: 5 })` to actually release the Postgres connection pool; `app.enableShutdownHooks()` in `main.ts` (Task 1) is what causes Nest to invoke it.
 
 No issues found.
