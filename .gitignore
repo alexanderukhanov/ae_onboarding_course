@@ -1,2 +1,9 @@
 .idea
 .claude/settings.local.json
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store

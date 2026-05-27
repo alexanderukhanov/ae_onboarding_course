@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "CommonJS",
+    "moduleResolution": "Bundler",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+
+    "types": ["node"],
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "incremental": true,
+    "removeComments": true,
+    "declaration": false,
+    "outDir": "./dist",
+    "rootDir": "./"
+  },
+  "include": ["src/**/*", "test/**/*", "db/**/*"]
+}
