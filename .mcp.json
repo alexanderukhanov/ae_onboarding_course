@@ -6,6 +6,16 @@
       "headers": {
         "Authorization": "Bearer ${GITHUB_PAT}"
       }
+    },
+    "postgres": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "docker rm -f postgres-mcp 2>/dev/null; exec docker run -i --rm --name postgres-mcp -e DATABASE_URI crystaldba/postgres-mcp --access-mode=unrestricted"
+      ],
+      "env": {
+        "DATABASE_URI": "${POSTGRES_MCP_DATABASE_URL}"
+      }
     }
   }
 }
